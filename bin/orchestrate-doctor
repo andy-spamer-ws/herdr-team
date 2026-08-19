@@ -1,0 +1,188 @@
+#!/usr/bin/env bash
+# orchestrate-doctor — read-only readiness check for the herdr-team bundle.
+#
+# Runs every check, always. It never stops at the first failure, because the
+# thing you want to know is the full state of the install, not the first
+# thing that happens to be wrong.
+#
+#   PASS  the check succeeded
+#   WARN  not fatal — the toolchain still runs, but something is degraded or a
+#         different copy of a component is the one actually active
+#   FAIL  something required is missing; the remedy is on the same line
+#
+# A component that is present and working but resolves outside this bundle is a
+# WARN, not a FAIL. That is the expected state when this bundle sits alongside
+# an existing install — nothing is broken, a different copy is just in charge.
+#
+# Exit status: 0 if nothing failed, 1 otherwise. Warnings never change the exit
+# status.
+#
+# usage: orchestrate-doctor [--claude-dir DIR]
+#
+#   --claude-dir DIR  your Claude Code config dir (default: $HOME/.claude)
+
+set -uo pipefail
+
+# --------------------------------------------------- bundle root (symlink-safe)
+resolve_path() {
+  local src="$1" dir target hops=0
+  while [ -L "$src" ]; do
+    hops=$((hops + 1))
+    if [ "$hops" -gt 40 ]; then
+      printf '%s' "$src"
+      return 0
+    fi
+    dir=$(cd -P "$(dirname "$src")" >/dev/null 2>&1 && pwd)
+    target=$(readlink "$src")
+    case "$target" in
+      /*) src="$target" ;;
+      *)  src="$dir/$target" ;;
+    esac
+  done
+  if dir=$(cd -P "$(dirname "$src")" >/dev/null 2>&1 && pwd); then
+    printf '%s/%s' "$dir" "$(basename "$src")"
+  else
+    printf '%s' "$src"
+  fi
+}
+
+SELF="$(resolve_path "${BASH_SOURCE[0]}")"
+BUNDLE_ROOT="$(cd -P "$(dirname "$SELF")/.." >/dev/null 2>&1 && pwd)"
+
+CLAUDE_DIR="$HOME/.claude"
+
+usage() {
+  cat >&2 <<'EOF'
+usage: orchestrate-doctor [--claude-dir DIR]
+
+  --claude-dir DIR  your Claude Code config dir (default: $HOME/.claude)
+EOF
+  exit 2
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --claude-dir) CLAUDE_DIR="${2:-}"; shift 2 ;;
+    -h|--help)    usage ;;
+    *) printf 'orchestrate-doctor: unknown option %s\n' "$1" >&2; usage ;;
+  esac
+done
+
+N_PASS=0
+N_WARN=0
+N_FAIL=0
+
+pass() { printf 'PASS  %-34s %s\n' "$1" "$2"; N_PASS=$((N_PASS + 1)); }
+warn() { printf 'WARN  %-34s %s\n' "$1" "$2"; N_WARN=$((N_WARN + 1)); }
+fail() { printf 'FAIL  %-34s %s\n' "$1" "$2"; N_FAIL=$((N_FAIL + 1)); }
+
+printf 'bundle       %s\n' "$BUNDLE_ROOT"
+printf 'claude dir   %s\n\n' "$CLAUDE_DIR"
+
+# ------------------------------------------------------------- 1. bash version
+BASH_MAJOR="${BASH_VERSINFO[0]}"
+BASH_MINOR="${BASH_VERSINFO[1]}"
+if [ "$BASH_MAJOR" -gt 3 ] || { [ "$BASH_MAJOR" -eq 3 ] && [ "$BASH_MINOR" -ge 2 ]; }; then
+  pass "bash version" "$BASH_VERSION"
+else
+  warn "bash version" "$BASH_VERSION is below 3.2 — install a newer bash (brew install bash)"
+fi
+
+# --------------------------------------------------------- 2. herdr (required)
+if command -v herdr >/dev/null 2>&1; then
+  HERDR_VERSION="$(herdr --version 2>&1 | head -n 1)"
+  if [ -n "$HERDR_VERSION" ]; then
+    pass "herdr on PATH" "$(command -v herdr) — $HERDR_VERSION"
+  else
+    warn "herdr on PATH" "$(command -v herdr) — 'herdr --version' printed nothing"
+  fi
+else
+  fail "herdr on PATH" "herdr is a hard dependency — install it and reopen your shell"
+fi
+
+# -------------------------------------------------------- 3. claude (required)
+if command -v claude >/dev/null 2>&1; then
+  pass "claude on PATH" "$(command -v claude)"
+else
+  fail "claude on PATH" "install Claude Code — ccd and ccw exec it directly"
+fi
+
+# ------------------------------------------------------- 4. python3 (required)
+if command -v python3 >/dev/null 2>&1; then
+  pass "python3 on PATH" "$(command -v python3)"
+else
+  fail "python3 on PATH" "ccd and ccw parse herdr JSON with python3 — install it"
+fi
+
+# --------------------------------------------------- 5. HERDR_ENV (info only)
+if [ "${HERDR_ENV:-}" = 1 ]; then
+  pass "HERDR_ENV" "1 — this shell is inside herdr"
+else
+  warn "HERDR_ENV" "not set — informational; you are not in a herdr pane right now"
+fi
+
+# ------------------------------------------------------ 6. addendum (required)
+ADDENDUM_PATH="${CCW_ADDENDUM:-$BUNDLE_ROOT/prompts/sr_opus_5_system_prompt.md}"
+if [ -r "$ADDENDUM_PATH" ]; then
+  ADDENDUM_SIZE="$(wc -c <"$ADDENDUM_PATH" | awk '{printf "%.1fK", $1/1024}')"
+  pass "addendum readable" "$ADDENDUM_PATH ($ADDENDUM_SIZE)"
+else
+  fail "addendum readable" "$ADDENDUM_PATH missing — ccd/ccw still run, but without the SR prompt"
+fi
+
+# ------------------------------------------- 7/8. installed into the claude dir
+check_installed() {
+  local label="$1" dst="$2" expected="$3" actual
+  if [ ! -e "$dst" ] && [ ! -L "$dst" ]; then
+    fail "$label" "$dst not installed — run ./install.sh"
+    return 0
+  fi
+  actual="$(resolve_path "$dst")"
+  if [ "$actual" = "$expected" ]; then
+    pass "$label" "$dst -> $actual"
+  else
+    warn "$label" "active copy is $actual, not this bundle — expected if the bundle is a shareable copy alongside an existing install; ./install.sh --force switches over"
+  fi
+}
+
+check_installed "orchestrator agent installed" \
+  "$CLAUDE_DIR/agents/orchestrator.md" \
+  "$BUNDLE_ROOT/agents/orchestrator.md"
+
+check_installed "orchestrate skill installed" \
+  "$CLAUDE_DIR/skills/orchestrate" \
+  "$BUNDLE_ROOT/skills/orchestrate"
+
+# ------------------------------------------------- 9/10. ccd and ccw on PATH
+check_on_path() {
+  local label="$1" cmd="$2" expected="$3" found actual
+  if ! found="$(command -v "$cmd" 2>/dev/null)"; then
+    fail "$label" "$cmd not on PATH — run ./install.sh, and put the prefix dir on PATH"
+    return 0
+  fi
+  actual="$(resolve_path "$found")"
+  if [ "$actual" = "$expected" ]; then
+    pass "$label" "$found -> $actual"
+  else
+    warn "$label" "active copy is $actual, not this bundle — expected if the bundle is a shareable copy alongside an existing install; ./install.sh --force switches over"
+  fi
+}
+
+check_on_path "ccd resolves to this bundle" ccd "$BUNDLE_ROOT/bin/ccd"
+check_on_path "ccw resolves to this bundle" ccw "$BUNDLE_ROOT/bin/ccw"
+
+# ----------------------------------------------------------------- summary
+printf '\nsummary      %d pass, %d warn, %d fail\n' "$N_PASS" "$N_WARN" "$N_FAIL"
+
+if [ "$N_FAIL" -gt 0 ]; then
+  printf 'verdict      not ready — %d required check(s) failed, see the FAIL lines above\n' "$N_FAIL"
+  exit 1
+fi
+
+if [ "$N_WARN" -gt 0 ]; then
+  printf 'verdict      ready — with %d warning(s); nothing is broken, see the WARN lines above\n' "$N_WARN"
+  exit 0
+fi
+
+printf 'verdict      ready\n'
+exit 0

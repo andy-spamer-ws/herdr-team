@@ -1,0 +1,160 @@
+#!/usr/bin/env bash
+# ccd — Claude, always: inside herdr · with the SR addendum prompt · in orchestrator mode.
+#
+#   1. Runs Claude inside a herdr session (attaches one, or cold-launches it).
+#   2. Always appends the "clear, concise, actionable" addendum system prompt.
+#   3. Always boots the `orchestrator` agent, which delegates instead of doing.
+#
+# Part of the herdr-team bundle. This script may be invoked through a symlink
+# (install.sh puts one in your PATH); it resolves that symlink back to the
+# bundle root and reads the addendum from <bundle>/prompts/. Nothing outside
+# the bundle is required apart from bash, python3, herdr and claude.
+#
+# An optional leading positional argument (one that does not start with '-')
+# sets the herdr pane/agent name instead of the default `orch-<dirname>`. It is
+# consumed here and never passed through to claude. All other args (including
+# `-c` and any other claude flag as the first arg) pass straight through.
+#   ccd                      → orchestrator in a herdr pane for $PWD
+#   ccd -c                   → same, continuing the last conversation
+#   ccd my-task               → pane named `my-task` (or `my-task-2`, ... if taken)
+#   ccd my-task -c            → named pane, continuing the last conversation
+#   CCD_PLAIN=1 ccd          → skip orchestrator mode (addendum + herdr still apply)
+#   CCD_HERDR_SESSION=work ccd → use a named herdr session instead of `default`
+#   CCD_ADDENDUM=/path/x.md ccd → use a different addendum system prompt
+#   CCD_CLAUDE_DIR=/path ccd → look for the orchestrator agent under a Claude
+#                              Code config dir other than $HOME/.claude (same
+#                              default install.sh and orchestrate-doctor use)
+#
+# Pane naming: default base name is `orch-<basename of $PWD>`. If an agent with
+# that name already exists (per `herdr agent list`), `-2`, `-3`, ... is
+# appended until a free name is found (capped at 20 attempts).
+
+set -euo pipefail
+
+# --------------------------------------------------- bundle root (symlink-safe)
+# stock macOS has no `readlink -f` and no `realpath`, and /bin/bash is 3.2.57,
+# so walk the symlink chain by hand. The hop cap breaks symlink cycles.
+resolve_bundle_root() {
+  local src="$1" dir target hops=0
+  while [ -L "$src" ]; do
+    hops=$((hops + 1))
+    if [ "$hops" -gt 40 ]; then
+      printf 'ccd: symlink cycle (or >40 hops) resolving %s\n' "$1" >&2
+      return 1
+    fi
+    dir=$(cd -P "$(dirname "$src")" >/dev/null 2>&1 && pwd)
+    target=$(readlink "$src")
+    case "$target" in
+      /*) src="$target" ;;
+      *)  src="$dir/$target" ;;
+    esac
+  done
+  dir=$(cd -P "$(dirname "$src")" >/dev/null 2>&1 && pwd)
+  # this script lives in <bundle>/bin/, so the bundle root is one level up
+  (cd -P "$dir/.." >/dev/null 2>&1 && pwd)
+}
+
+BUNDLE_ROOT="$(resolve_bundle_root "${BASH_SOURCE[0]}")"
+
+ADDENDUM="${CCD_ADDENDUM:-$BUNDLE_ROOT/prompts/sr_opus_5_system_prompt.md}"
+SESSION="${CCD_HERDR_SESSION:-default}"
+CLAUDE_DIR="${CCD_CLAUDE_DIR:-$HOME/.claude}"
+
+# ------------------------------------------------------- optional pane name
+AGENT_BASE_NAME="orch-$(basename "$PWD")"
+if [[ $# -gt 0 && "$1" != -* ]]; then
+  AGENT_BASE_NAME="$1"
+  shift
+fi
+
+# ---------------------------------------------------------------- claude argv
+argv=(claude --dangerously-skip-permissions)
+
+if [[ -r "$ADDENDUM" ]]; then
+  argv+=(--append-system-prompt "$(cat "$ADDENDUM")")
+else
+  printf 'ccd: addendum system prompt not readable at %s — continuing without it\n' "$ADDENDUM" >&2
+fi
+
+if [[ "${CCD_PLAIN:-0}" != 1 ]]; then
+  if [[ -r "$CLAUDE_DIR/agents/orchestrator.md" ]]; then
+    argv+=(--agent orchestrator)
+  else
+    printf 'ccd: %s/agents/orchestrator.md missing — starting without orchestrator mode\n' "$CLAUDE_DIR" >&2
+  fi
+fi
+
+argv+=("$@")
+
+# ------------------------------------------------------- already inside herdr
+if [[ "${HERDR_ENV:-}" == 1 ]]; then
+  exec "${argv[@]}"
+fi
+
+# ----------------------------------------------------------------- herdr side
+command -v herdr >/dev/null 2>&1 || {
+  printf 'ccd: herdr not on PATH — running claude bare\n' >&2
+  exec "${argv[@]}"
+}
+
+herdr_up() {
+  herdr session list --json 2>/dev/null \
+    | python3 -c 'import json,sys
+try: s=json.load(sys.stdin)["sessions"]
+except Exception: sys.exit(1)
+sys.exit(0 if any(x.get("name")==sys.argv[1] and x.get("running") for x in s) else 1)' "$SESSION"
+}
+
+resolve_agent_name() {
+  local base="$1" candidate suffix existing
+  existing="$(herdr agent list 2>/dev/null)"
+  candidate="$base"
+  suffix=1
+  while true; do
+    if ! printf '%s' "$existing" | python3 -c '
+import json, sys
+try:
+    agents = json.load(sys.stdin)["result"]["agents"]
+except Exception:
+    sys.exit(1)
+sys.exit(0 if any(a.get("name") == sys.argv[1] for a in agents) else 1)
+' "$candidate"; then
+      printf '%s' "$candidate"
+      return 0
+    fi
+    suffix=$((suffix + 1))
+    if (( suffix > 20 )); then
+      printf 'ccd: no free agent name found after 20 attempts (base: %s)\n' "$base" >&2
+      return 1
+    fi
+    candidate="${base}-${suffix}"
+  done
+}
+
+spawn_claude() {
+  local pane_name
+  pane_name="$(resolve_agent_name "$AGENT_BASE_NAME")" || return 1
+  printf 'ccd: pane name = %s\n' "$pane_name" >&2
+  herdr agent start "$pane_name" --cwd "$PWD" --focus -- "${argv[@]}" >/dev/null
+}
+
+if herdr_up; then
+  spawn_claude
+  exec herdr session attach "$SESSION"
+fi
+
+# Cold start: herdr's TUI must own the foreground, so a background waiter polls
+# for the socket and drops the Claude pane in as soon as the server is up.
+(
+  for _ in $(seq 1 150); do
+    if herdr_up; then
+      sleep 0.7          # let the server finish restoring persisted workspaces
+      spawn_claude || printf 'ccd: failed to spawn claude pane\n' >&2
+      exit 0
+    fi
+    sleep 0.2
+  done
+  printf 'ccd: herdr did not come up within 30s — no claude pane started\n' >&2
+) &
+
+exec herdr --session "$SESSION"

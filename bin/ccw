@@ -1,0 +1,216 @@
+#!/usr/bin/env bash
+# ccw — launch a named Claude worker in a herdr pane at a chosen tier.
+#
+# Sibling of ccd. ccd starts an orchestrator for you; ccw starts a worker for
+# the orchestrator. Every worker gets: a name, a tier (the model dial), the SR
+# addendum system prompt, and skipped permissions.
+#
+# Part of the herdr-team bundle. This script may be invoked through a symlink
+# (install.sh puts one in your PATH); it resolves that symlink back to the
+# bundle root and reads the addendum from <bundle>/prompts/.
+#
+#   ccw diagnose-89 --tier diagnose --cwd /path/to/repo
+#   ccw fix-90 --tier build --cwd /path/to/repo --split right --no-focus
+#   ccw issue-89 --tier hard --cwd /path/to/repo --new-tab issue-89-90
+#   ccw probe --tier mechanical --cwd . --dry-run
+#
+# Tiers — the model is the dial, effort is a deviation:
+#   mechanical  --model haiku    (no --effort; haiku rejects it)
+#   build       --model sonnet   (already defaults to high)
+#   diagnose    --model opus     (already defaults to high)
+#   hard        --model opus --effort xhigh
+
+set -euo pipefail
+
+# --------------------------------------------------- bundle root (symlink-safe)
+# stock macOS has no `readlink -f` and no `realpath`, and /bin/bash is 3.2.57,
+# so walk the symlink chain by hand. The hop cap breaks symlink cycles.
+resolve_bundle_root() {
+  local src="$1" dir target hops=0
+  while [ -L "$src" ]; do
+    hops=$((hops + 1))
+    if [ "$hops" -gt 40 ]; then
+      printf 'ccw: symlink cycle (or >40 hops) resolving %s\n' "$1" >&2
+      return 1
+    fi
+    dir=$(cd -P "$(dirname "$src")" >/dev/null 2>&1 && pwd)
+    target=$(readlink "$src")
+    case "$target" in
+      /*) src="$target" ;;
+      *)  src="$dir/$target" ;;
+    esac
+  done
+  dir=$(cd -P "$(dirname "$src")" >/dev/null 2>&1 && pwd)
+  # this script lives in <bundle>/bin/, so the bundle root is one level up
+  (cd -P "$dir/.." >/dev/null 2>&1 && pwd)
+}
+
+BUNDLE_ROOT="$(resolve_bundle_root "${BASH_SOURCE[0]}")"
+
+ADDENDUM="${CCW_ADDENDUM:-$BUNDLE_ROOT/prompts/sr_opus_5_system_prompt.md}"
+
+usage() {
+  cat >&2 <<'EOF'
+usage: ccw <name> --tier <mechanical|build|diagnose|hard> [--cwd PATH]
+           [--split right|down] [--tab ID] [--new-tab LABEL]
+           [--focus|--no-focus] [--dry-run] [-- extra claude args]
+
+tiers:
+  mechanical   --model haiku            rename, move, delete, mechanical edits
+  build        --model sonnet           write the code, write the tests
+  diagnose     --model opus             find out why, read across modules
+  hard         --model opus --effort xhigh   design, tricky concurrency, migrations
+
+env:
+  CCW_ADDENDUM   override the addendum system prompt path
+                 (default: <bundle>/prompts/sr_opus_5_system_prompt.md)
+EOF
+  exit 2
+}
+
+# ------------------------------------------------------------------ arg parse
+NAME=""
+TIER=""
+CWD="$PWD"
+SPLIT=""
+TAB=""
+NEW_TAB=""
+FOCUS=""
+DRY_RUN=0
+extra=()
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --tier)     TIER="${2:-}"; shift 2 ;;
+    --cwd)      CWD="${2:-}"; shift 2 ;;
+    --split)    SPLIT="${2:-}"; shift 2 ;;
+    --tab)      TAB="${2:-}"; shift 2 ;;
+    --new-tab)  NEW_TAB="${2:-}"; shift 2 ;;
+    --focus)    FOCUS="--focus"; shift ;;
+    --no-focus) FOCUS="--no-focus"; shift ;;
+    --dry-run)  DRY_RUN=1; shift ;;
+    -h|--help)  usage ;;
+    --)         shift; extra=("$@"); break ;;
+    -*)         printf 'ccw: unknown option %s\n' "$1" >&2; usage ;;
+    *)
+      if [[ -z "$NAME" ]]; then NAME="$1"; shift
+      else printf 'ccw: unexpected argument %s\n' "$1" >&2; usage
+      fi
+      ;;
+  esac
+done
+
+[[ -n "$NAME" ]] || { printf 'ccw: missing <name>\n' >&2; usage; }
+[[ -n "$TIER" ]] || { printf 'ccw: missing --tier\n' >&2; usage; }
+
+case "$TIER" in
+  mechanical) MODEL=haiku;  EFFORT="" ;;
+  build)      MODEL=sonnet; EFFORT="" ;;
+  diagnose)   MODEL=opus;   EFFORT="" ;;
+  hard)       MODEL=opus;   EFFORT="xhigh" ;;
+  *) printf 'ccw: unknown tier %s\n' "$TIER" >&2; usage ;;
+esac
+
+if [[ -n "$SPLIT" && "$SPLIT" != right && "$SPLIT" != down ]]; then
+  printf 'ccw: --split must be right or down\n' >&2; usage
+fi
+
+if [[ -n "$TAB" && -n "$NEW_TAB" ]]; then
+  printf 'ccw: --tab and --new-tab are mutually exclusive\n' >&2; usage
+fi
+
+# ---------------------------------------------------------------- claude argv
+claude_argv=(claude --model "$MODEL")
+[[ -n "$EFFORT" ]] && claude_argv+=(--effort "$EFFORT")
+
+ADDENDUM_TEXT=""
+if [[ -r "$ADDENDUM" ]]; then
+  ADDENDUM_TEXT="$(cat "$ADDENDUM")"
+  claude_argv+=(--append-system-prompt "$ADDENDUM_TEXT")
+else
+  printf 'ccw: addendum system prompt not readable at %s — continuing without it\n' "$ADDENDUM" >&2
+fi
+
+claude_argv+=(--dangerously-skip-permissions)
+[[ ${#extra[@]:-0} -gt 0 ]] && claude_argv+=("${extra[@]}")
+
+# ----------------------------------------------------------------- placement
+placement=()
+[[ -n "$SPLIT" ]] && placement+=(--split "$SPLIT")
+[[ -n "$FOCUS" ]] && placement+=("$FOCUS")
+
+# ------------------------------------------------------------------- dry run
+if [[ "$DRY_RUN" == 1 ]]; then
+  if [[ -n "$NEW_TAB" ]]; then
+    printf 'herdr tab create --label %q --cwd %q --no-focus\n' "$NEW_TAB" "$CWD"
+    printf '# then, with TAB_ID from that response:\n'
+    printf 'herdr agent start %q --cwd %q --tab "$TAB_ID"' "$NAME" "$CWD"
+  else
+    printf 'herdr agent start %q --cwd %q' "$NAME" "$CWD"
+    [[ -n "$TAB" ]] && printf ' --tab %q' "$TAB"
+  fi
+  for a in ${placement[@]+"${placement[@]}"}; do printf ' %q' "$a"; done
+  printf ' --'
+  # the addendum body is elided — it is ~6KB of markdown and floods both the
+  # terminal and, when an orchestrator runs this, its context window.
+  addendum_size=$(printf '%s' "$ADDENDUM_TEXT" \
+    | wc -c | awk '{printf "%.1fK", $1/1024}')
+  for a in "${claude_argv[@]}"; do
+    if [[ -n "$ADDENDUM_TEXT" && "$a" == "$ADDENDUM_TEXT" ]]; then
+      printf ' <addendum: %s from %s>' "$addendum_size" "$ADDENDUM"
+    else
+      printf ' %q' "$a"
+    fi
+  done
+  printf '\n'
+  exit 0
+fi
+
+# ---------------------------------------------------------------- herdr side
+command -v herdr >/dev/null 2>&1 || {
+  printf 'ccw: herdr not on PATH — cannot start a worker pane\n' >&2
+  exit 1
+}
+
+if [[ -n "$NEW_TAB" ]]; then
+  TAB=$(herdr tab create --label "$NEW_TAB" --cwd "$CWD" --no-focus \
+    | python3 -c 'import json,sys; print(json.load(sys.stdin)["result"]["tab"]["tab_id"])')
+fi
+
+start=(herdr agent start "$NAME" --cwd "$CWD")
+[[ -n "$TAB" ]] && start+=(--tab "$TAB")
+start+=(${placement[@]+"${placement[@]}"})
+start+=(-- "${claude_argv[@]}")
+
+# Capture herdr response and parse it
+if ! output=$("${start[@]}" 2>&1); then
+  printf 'ccw: herdr agent start failed\n%s\n' "$output" >&2
+  exit 1
+fi
+
+# Parse the JSON to extract pane_id and agent_name
+if ! parse_result=$(printf '%s' "$output" | python3 -c 'import json,sys
+try:
+  data = json.load(sys.stdin)
+  pane_id = data["result"]["agent"]["pane_id"]
+  agent_name = data["result"]["agent"]["name"]
+  print(f"{agent_name}\t{pane_id}")
+except KeyError as e:
+  print(f"error: missing key {e} in herdr response", file=sys.stderr)
+  print(json.dumps(data, indent=2), file=sys.stderr)
+  sys.exit(1)
+except Exception as e:
+  print(f"error: {e}", file=sys.stderr)
+  print(json.dumps(data, indent=2), file=sys.stderr)
+  sys.exit(1)
+'); then
+  printf 'ccw: failed to parse herdr response\n%s\n' "$parse_result" >&2
+  exit 1
+fi
+
+# Extract agent_name and pane_id from parse result
+AGENT_NAME=$(printf '%s' "$parse_result" | cut -f1)
+pane_id=$(printf '%s' "$parse_result" | cut -f2)
+
+# Print confirmation line
+printf 'started %s  pane %s  tier %s  model %s\n' "$AGENT_NAME" "$pane_id" "$TIER" "$MODEL"
