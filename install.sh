@@ -92,6 +92,11 @@ done
 [[ -n "$PREFIX" ]]      || { printf 'install.sh: --prefix needs a value\n' >&2; usage; }
 [[ -n "$COPILOT_DIR" ]] || { printf 'install.sh: --copilot-dir needs a value\n' >&2; usage; }
 
+case "$COPILOT_DIR" in
+  /*) ;;
+  *) COPILOT_DIR="$(pwd -P)/$COPILOT_DIR" ;;
+esac
+
 LIBRARY_DIR="$COPILOT_DIR/skill-library"
 LINKED=0
 ALREADY=0
@@ -173,6 +178,42 @@ link_one() {
   return 0
 }
 
+can_link() {
+  local src="$1" dst="$2" previous="${3:-}" current
+  if [[ -L "$dst" ]]; then
+    current="$(readlink "$dst")"
+    if [[ "$current" == "$src" || "$current" == "$previous" || "$FORCE" == 1 ]]; then
+      return 0
+    fi
+    printf 'BLOCKED      %s is a symlink to %s — rerun with --force to replace it\n' "$dst" "$current"
+    BLOCKED=$((BLOCKED + 1))
+    return 1
+  fi
+  if [[ -e "$dst" ]]; then
+    printf 'BLOCKED      %s exists and is not a symlink — move it aside, then rerun\n' "$dst"
+    BLOCKED=$((BLOCKED + 1))
+    return 1
+  fi
+  return 0
+}
+
+preflight_library_links() {
+  local blocked=0
+  can_link "$BUNDLE_ROOT/agents/orchestrator.md" "$LIBRARY_DIR/agents/orchestrator.md" || blocked=1
+  can_link "$BUNDLE_ROOT/agents/pre-pr-reviewer.md" "$LIBRARY_DIR/agents/pre-pr-reviewer.md" || blocked=1
+  can_link "$BUNDLE_ROOT/skills/orchestrate" "$LIBRARY_DIR/skills/orchestrate" || blocked=1
+  can_link "$BUNDLE_ROOT/skills/pre-pr-review" "$LIBRARY_DIR/skills/pre-pr-review" || blocked=1
+  can_link "$LIBRARY_DIR/agents/orchestrator.md" "$COPILOT_DIR/agents/orchestrator.md" \
+    "$BUNDLE_ROOT/agents/orchestrator.md" || blocked=1
+  can_link "$LIBRARY_DIR/agents/pre-pr-reviewer.md" "$COPILOT_DIR/agents/pre-pr-reviewer.md" \
+    "$BUNDLE_ROOT/agents/pre-pr-reviewer.md" || blocked=1
+  can_link "$LIBRARY_DIR/skills/orchestrate" "$COPILOT_DIR/skills/orchestrate" \
+    "$BUNDLE_ROOT/skills/orchestrate" || blocked=1
+  can_link "$LIBRARY_DIR/skills/pre-pr-review" "$COPILOT_DIR/skills/pre-pr-review" \
+    "$BUNDLE_ROOT/skills/pre-pr-review" || blocked=1
+  return "$blocked"
+}
+
 install_addendum() {
   local src="$BUNDLE_ROOT/prompts/sr_opus_5_system_prompt.md"
   local dst="$COPILOT_DIR/copilot-instructions.md"
@@ -251,24 +292,23 @@ if [[ -d "$LIBRARY_DIR" ]]; then
     FAILED=$((FAILED + 1))
   elif ensure_dir "$LIBRARY_DIR/agents" &&
        ensure_dir "$LIBRARY_DIR/skills" &&
+       ensure_dir "$COPILOT_DIR/agents" &&
+       ensure_dir "$COPILOT_DIR/skills" &&
+       preflight_library_links &&
        register_library; then
     link_one "$BUNDLE_ROOT/agents/orchestrator.md" "$LIBRARY_DIR/agents/orchestrator.md" || true
     link_one "$BUNDLE_ROOT/agents/pre-pr-reviewer.md" "$LIBRARY_DIR/agents/pre-pr-reviewer.md" || true
     link_one "$BUNDLE_ROOT/skills/orchestrate" "$LIBRARY_DIR/skills/orchestrate" || true
     link_one "$BUNDLE_ROOT/skills/pre-pr-review" "$LIBRARY_DIR/skills/pre-pr-review" || true
 
-    if ensure_dir "$COPILOT_DIR/agents"; then
-      link_one "$LIBRARY_DIR/agents/orchestrator.md" "$COPILOT_DIR/agents/orchestrator.md" \
-        "$BUNDLE_ROOT/agents/orchestrator.md" || true
-      link_one "$LIBRARY_DIR/agents/pre-pr-reviewer.md" "$COPILOT_DIR/agents/pre-pr-reviewer.md" \
-        "$BUNDLE_ROOT/agents/pre-pr-reviewer.md" || true
-    fi
-    if ensure_dir "$COPILOT_DIR/skills"; then
-      link_one "$LIBRARY_DIR/skills/orchestrate" "$COPILOT_DIR/skills/orchestrate" \
-        "$BUNDLE_ROOT/skills/orchestrate" || true
-      link_one "$LIBRARY_DIR/skills/pre-pr-review" "$COPILOT_DIR/skills/pre-pr-review" \
-        "$BUNDLE_ROOT/skills/pre-pr-review" || true
-    fi
+    link_one "$LIBRARY_DIR/agents/orchestrator.md" "$COPILOT_DIR/agents/orchestrator.md" \
+      "$BUNDLE_ROOT/agents/orchestrator.md" || true
+    link_one "$LIBRARY_DIR/agents/pre-pr-reviewer.md" "$COPILOT_DIR/agents/pre-pr-reviewer.md" \
+      "$BUNDLE_ROOT/agents/pre-pr-reviewer.md" || true
+    link_one "$LIBRARY_DIR/skills/orchestrate" "$COPILOT_DIR/skills/orchestrate" \
+      "$BUNDLE_ROOT/skills/orchestrate" || true
+    link_one "$LIBRARY_DIR/skills/pre-pr-review" "$COPILOT_DIR/skills/pre-pr-review" \
+      "$BUNDLE_ROOT/skills/pre-pr-review" || true
   fi
 else
   printf 'WARN         %s not found — linking Copilot artefacts directly; install librarian to enable discovery\n' "$LIBRARY_DIR"

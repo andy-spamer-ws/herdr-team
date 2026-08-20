@@ -90,6 +90,11 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+case "$COPILOT_DIR" in
+  /*) ;;
+  *) COPILOT_DIR="$(pwd -P)/$COPILOT_DIR" ;;
+esac
+
 LIBRARY_DIR="$COPILOT_DIR/skill-library"
 REMOVED=0
 KEPT=0

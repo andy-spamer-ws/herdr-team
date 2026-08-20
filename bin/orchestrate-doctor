@@ -71,6 +71,11 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+case "$COPILOT_DIR" in
+  /*) ;;
+  *) COPILOT_DIR="$(pwd -P)/$COPILOT_DIR" ;;
+esac
+
 LIBRARY_DIR="$COPILOT_DIR/skill-library"
 N_PASS=0
 N_WARN=0
@@ -165,7 +170,7 @@ fi
 # ------------------------------------------ 7/8. installed into the copilot dir
 check_installed() {
   local label="$1" dst="$2" expected="$3" actual
-  if [ ! -e "$dst" ] && [ ! -L "$dst" ]; then
+  if [ ! -e "$dst" ]; then
     fail "$label" "$dst not installed — run ./install.sh"
     return 0
   fi
@@ -178,7 +183,7 @@ check_installed() {
 }
 
 check_library_install() {
-  local label="$1" dst="$2" library_entry="$3" source="$4" first second actual
+  local label="$1" dst="$2" library_entry="$3" source="$4" first second actual chain
   if [ ! -L "$dst" ]; then
     fail "$label" "$dst is not a symlink — rerun ./install.sh"
     return 0
@@ -194,7 +199,8 @@ check_library_install() {
   fi
   second="$(readlink "$library_entry")"
   actual="$(resolve_path "$library_entry")"
-  if [ "$second" != "$source" ] || [ "$actual" != "$source" ]; then
+  chain="$(resolve_path "$dst")"
+  if [ "$second" != "$source" ] || [ "$actual" != "$source" ] || [ "$chain" != "$source" ]; then
     fail "$label" "$library_entry does not resolve to $source — rerun ./install.sh --force"
     return 0
   fi
