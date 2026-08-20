@@ -1,33 +1,37 @@
 #!/usr/bin/env bash
-# ccd — Claude, always: inside herdr · with the SR addendum prompt · in orchestrator mode.
+# ccd — Copilot, always: inside herdr · in orchestrator mode.
 #
-#   1. Runs Claude inside a herdr session (attaches one, or cold-launches it).
-#   2. Always appends the "clear, concise, actionable" addendum system prompt.
-#   3. Always boots the `orchestrator` agent, which delegates instead of doing.
+#   1. Runs the GitHub Copilot CLI inside a herdr session (attaches one, or
+#      cold-launches it).
+#   2. Always boots the `orchestrator` agent, which delegates instead of doing.
 #
 # Part of the herdr-team bundle. This script may be invoked through a symlink
 # (install.sh puts one in your PATH); it resolves that symlink back to the
-# bundle root and reads the addendum from <bundle>/prompts/. Nothing outside
-# the bundle is required apart from bash, python3, herdr and claude.
+# bundle root and reads the role table from <bundle>/lib/. Nothing outside the
+# bundle is required apart from bash, python3, herdr and copilot.
+#
+# The SR communication addendum is not a launch flag — Copilot has no
+# `--append-system-prompt`. install.sh writes it once into the Copilot
+# instructions file, where it applies to every session including this one.
 #
 # An optional leading positional argument (one that does not start with '-')
 # sets the herdr pane/agent name instead of the default `orch-<dirname>`. It is
-# consumed here and never passed through to claude. All other args (including
-# `-c` and any other claude flag as the first arg) pass straight through.
-#   ccd                      → orchestrator in a herdr pane for $PWD
-#   ccd -c                   → same, continuing the last conversation
-#   ccd my-task               → pane named `my-task` (or `my-task-2`, ... if taken)
-#   ccd my-task -c            → named pane, continuing the last conversation
-#   CCD_PLAIN=1 ccd          → skip orchestrator mode (addendum + herdr still apply)
-#   CCD_HERDR_SESSION=work ccd → use a named herdr session instead of `default`
-#   CCD_ADDENDUM=/path/x.md ccd → use a different addendum system prompt
-#   CCD_CLAUDE_DIR=/path ccd → look for the orchestrator agent under a Claude
-#                              Code config dir other than $HOME/.claude (same
-#                              default install.sh and orchestrate-doctor use)
+# consumed here and never passed through to copilot. All other args pass
+# straight through.
+#   ccd                         → orchestrator in a herdr pane for $PWD
+#   ccd --continue              → same, resuming the most recent session
+#   ccd my-task                 → pane named `my-task` (or `my-task-2`, ... if taken)
+#   CCD_PLAIN=1 ccd             → skip orchestrator mode (herdr still applies)
+#   CCD_HERDR_SESSION=work ccd  → use a named herdr session instead of `default`
+#   CCD_COPILOT_DIR=/path ccd   → look for the orchestrator agent under a
+#                                 Copilot config dir other than $HOME/.copilot
+#                                 (the same default install.sh and
+#                                 orchestrate-doctor use for --copilot-dir)
 #
-# Pane naming: default base name is `orch-<basename of $PWD>`. If an agent with
-# that name already exists (per `herdr agent list`), `-2`, `-3`, ... is
-# appended until a free name is found (capped at 20 attempts).
+# Pane naming: default base name is `orch-<basename of $PWD>`, lowercased and
+# with anything outside [a-z0-9_-] replaced, because herdr requires agent names
+# to match [a-z][a-z0-9_-]{0,31}. If an agent with that name already exists,
+# `-2`, `-3`, ... is appended until a free name is found (capped at 20 attempts).
 
 set -euo pipefail
 
@@ -56,31 +60,42 @@ resolve_bundle_root() {
 
 BUNDLE_ROOT="$(resolve_bundle_root "${BASH_SOURCE[0]}")"
 
-ADDENDUM="${CCD_ADDENDUM:-$BUNDLE_ROOT/prompts/sr_opus_5_system_prompt.md}"
+# shellcheck source=../lib/roles.sh
+. "$BUNDLE_ROOT/lib/roles.sh"
+
 SESSION="${CCD_HERDR_SESSION:-default}"
-CLAUDE_DIR="${CCD_CLAUDE_DIR:-$HOME/.claude}"
+COPILOT_DIR="${CCD_COPILOT_DIR:-$HOME/.copilot}"
+START_TIMEOUT="${CCD_START_TIMEOUT:-120000}"
 
 # ------------------------------------------------------- optional pane name
-AGENT_BASE_NAME="orch-$(basename "$PWD")"
+sanitize_name() {
+  # herdr agent names must match [a-z][a-z0-9_-]{0,31}
+  printf '%s' "$1" \
+    | tr '[:upper:]' '[:lower:]' \
+    | sed -e 's/[^a-z0-9_-]/-/g' -e 's/^[^a-z]*//' \
+    | cut -c1-31
+}
+
+AGENT_BASE_NAME="$(sanitize_name "orch-$(basename "$PWD")")"
+[[ -n "$AGENT_BASE_NAME" ]] || AGENT_BASE_NAME="orch"
+
 if [[ $# -gt 0 && "$1" != -* ]]; then
-  AGENT_BASE_NAME="$1"
+  AGENT_BASE_NAME="$(sanitize_name "$1")"
   shift
+  [[ -n "$AGENT_BASE_NAME" ]] || {
+    printf 'ccd: pane name must start with a letter and use only [a-z0-9_-]\n' >&2
+    exit 2
+  }
 fi
 
-# ---------------------------------------------------------------- claude argv
-argv=(claude --dangerously-skip-permissions)
-
-if [[ -r "$ADDENDUM" ]]; then
-  argv+=(--append-system-prompt "$(cat "$ADDENDUM")")
-else
-  printf 'ccd: addendum system prompt not readable at %s — continuing without it\n' "$ADDENDUM" >&2
-fi
+# --------------------------------------------------------------- copilot argv
+argv=(copilot $(roles_flags orchestrator) --allow-all)
 
 if [[ "${CCD_PLAIN:-0}" != 1 ]]; then
-  if [[ -r "$CLAUDE_DIR/agents/orchestrator.md" ]]; then
+  if [[ -r "$COPILOT_DIR/agents/orchestrator.md" ]]; then
     argv+=(--agent orchestrator)
   else
-    printf 'ccd: %s/agents/orchestrator.md missing — starting without orchestrator mode\n' "$CLAUDE_DIR" >&2
+    printf 'ccd: %s/agents/orchestrator.md missing — starting without orchestrator mode\n' "$COPILOT_DIR" >&2
   fi
 fi
 
@@ -93,7 +108,7 @@ fi
 
 # ----------------------------------------------------------------- herdr side
 command -v herdr >/dev/null 2>&1 || {
-  printf 'ccd: herdr not on PATH — running claude bare\n' >&2
+  printf 'ccd: herdr not on PATH — running copilot bare\n' >&2
   exec "${argv[@]}"
 }
 
@@ -131,30 +146,55 @@ sys.exit(0 if any(a.get("name") == sys.argv[1] for a in agents) else 1)
   done
 }
 
-spawn_claude() {
-  local pane_name
+# herdr 0.8.0's `agent start` never creates layout: it needs a pane already
+# sitting at an interactive shell prompt. So make a tab, take its root pane,
+# and put copilot in there.
+spawn_copilot() {
+  local pane_name tab_out pane_id
   pane_name="$(resolve_agent_name "$AGENT_BASE_NAME")" || return 1
   printf 'ccd: pane name = %s\n' "$pane_name" >&2
-  herdr agent start "$pane_name" --cwd "$PWD" --focus -- "${argv[@]}" >/dev/null
+
+  tab_out=$(herdr tab create --label "$pane_name" --cwd "$PWD" --focus 2>&1) || {
+    printf 'ccd: herdr tab create failed\n%s\n' "$tab_out" >&2
+    return 1
+  }
+  pane_id=$(printf '%s' "$tab_out" | python3 -c '
+import json, sys
+try:
+    print(json.load(sys.stdin)["result"]["root_pane"]["pane_id"])
+except Exception:
+    sys.exit(1)
+') || {
+    printf 'ccd: could not read root pane id from herdr tab create\n' >&2
+    return 1
+  }
+
+  # argv[0] is `copilot`; herdr supplies the executable via --kind
+  if ! herdr agent start "$pane_name" --kind copilot --pane "$pane_id" \
+        --timeout "$START_TIMEOUT" -- "${argv[@]:1}" >/dev/null; then
+    printf 'ccd: herdr agent start failed — closing pane %s\n' "$pane_id" >&2
+    herdr pane close "$pane_id" >/dev/null 2>&1 || true
+    return 1
+  fi
 }
 
 if herdr_up; then
-  spawn_claude
+  spawn_copilot
   exec herdr session attach "$SESSION"
 fi
 
 # Cold start: herdr's TUI must own the foreground, so a background waiter polls
-# for the socket and drops the Claude pane in as soon as the server is up.
+# for the socket and drops the Copilot pane in as soon as the server is up.
 (
   for _ in $(seq 1 150); do
     if herdr_up; then
       sleep 0.7          # let the server finish restoring persisted workspaces
-      spawn_claude || printf 'ccd: failed to spawn claude pane\n' >&2
+      spawn_copilot || printf 'ccd: failed to spawn copilot pane\n' >&2
       exit 0
     fi
     sleep 0.2
   done
-  printf 'ccd: herdr did not come up within 30s — no claude pane started\n' >&2
+  printf 'ccd: herdr did not come up within 30s — no copilot pane started\n' >&2
 ) &
 
 exec herdr --session "$SESSION"

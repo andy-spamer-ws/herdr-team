@@ -5,11 +5,15 @@
 # inside this bundle. Regular files, directories, and symlinks pointing
 # somewhere else are reported and left exactly as they are.
 #
-# usage: ./uninstall.sh [--prefix DIR] [--claude-dir DIR] [--dry-run]
+# usage: ./uninstall.sh [--prefix DIR] [--copilot-dir DIR] [--dry-run]
 #
-#   --prefix DIR      where ccd/ccw/orchestrate-doctor were linked (default: $HOME/bin)
-#   --claude-dir DIR  your Claude Code config dir                  (default: $HOME/.claude)
-#   --dry-run         print every action, change nothing
+#   --prefix DIR       where ccd/ccw/orchestrate-doctor were linked (default: $HOME/bin)
+#   --copilot-dir DIR  your Copilot CLI config dir                  (default: $HOME/.copilot)
+#   --dry-run          print every action, change nothing
+#
+# The SR addendum block in <copilot-dir>/copilot-instructions.md is removed by
+# its BEGIN/END markers. Everything else in that file is preserved, and the
+# file is left in place even when the block was the only thing in it.
 
 set -euo pipefail
 
@@ -58,26 +62,30 @@ resolve_path() {
 BUNDLE_ROOT="$(resolve_dir "${BASH_SOURCE[0]}")"
 
 PREFIX="$HOME/bin"
-CLAUDE_DIR="$HOME/.claude"
+COPILOT_DIR="$HOME/.copilot"
 DRY_RUN=0
+
+# Markers must match install.sh and orchestrate-doctor exactly.
+ADDENDUM_BEGIN='<!-- BEGIN herdr-team SR addendum (managed) -->'
+ADDENDUM_END='<!-- END herdr-team SR addendum (managed) -->'
 
 usage() {
   cat >&2 <<'EOF'
-usage: ./uninstall.sh [--prefix DIR] [--claude-dir DIR] [--dry-run]
+usage: ./uninstall.sh [--prefix DIR] [--copilot-dir DIR] [--dry-run]
 
-  --prefix DIR      where ccd/ccw/orchestrate-doctor were linked (default: $HOME/bin)
-  --claude-dir DIR  your Claude Code config dir                  (default: $HOME/.claude)
-  --dry-run         print every action, change nothing
+  --prefix DIR       where ccd/ccw/orchestrate-doctor were linked (default: $HOME/bin)
+  --copilot-dir DIR  your Copilot CLI config dir                  (default: $HOME/.copilot)
+  --dry-run          print every action, change nothing
 EOF
   exit 2
 }
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --prefix)     PREFIX="${2:-}"; shift 2 ;;
-    --claude-dir) CLAUDE_DIR="${2:-}"; shift 2 ;;
-    --dry-run)    DRY_RUN=1; shift ;;
-    -h|--help)    usage ;;
+    --prefix)      PREFIX="${2:-}"; shift 2 ;;
+    --copilot-dir) COPILOT_DIR="${2:-}"; shift 2 ;;
+    --dry-run)     DRY_RUN=1; shift ;;
+    -h|--help)     usage ;;
     *) printf 'uninstall.sh: unknown option %s\n' "$1" >&2; usage ;;
   esac
 done
@@ -120,6 +128,66 @@ unlink_one() {
   return 0
 }
 
+remove_addendum() {
+  local dst="$COPILOT_DIR/copilot-instructions.md"
+
+  if [[ ! -f "$dst" ]]; then
+    printf 'not present  %s\n' "$dst"
+    ABSENT=$((ABSENT + 1))
+    return 0
+  fi
+
+  if ! grep -qF "$ADDENDUM_BEGIN" "$dst"; then
+    printf 'left alone   %s has no herdr-team addendum block\n' "$dst"
+    KEPT=$((KEPT + 1))
+    return 0
+  fi
+
+  if [[ "$DRY_RUN" == 1 ]]; then
+    printf 'would remove addendum block from %s\n' "$dst"
+    REMOVED=$((REMOVED + 1))
+    return 0
+  fi
+
+  local tmp
+  tmp="$(mktemp "${TMPDIR:-/tmp}/herdr-team-instructions.XXXXXX")"
+  if ! BEGIN_MARK="$ADDENDUM_BEGIN" END_MARK="$ADDENDUM_END" \
+       python3 -c '
+import os, sys
+begin, end = os.environ["BEGIN_MARK"], os.environ["END_MARK"]
+out, skipping = [], False
+with open(sys.argv[1], encoding="utf-8") as fh:
+    for line in fh:
+        if line.strip() == begin:
+            skipping = True
+            # drop the single blank separator install.sh wrote before the block
+            while out and out[-1].strip() == "":
+                out.pop()
+            continue
+        if skipping:
+            if line.strip() == end:
+                skipping = False
+            continue
+        out.append(line)
+if skipping:
+    print("uninstall.sh: no END marker found — leaving file untouched", file=sys.stderr)
+    sys.exit(1)
+with open(sys.argv[2], "w", encoding="utf-8") as fh:
+    fh.writelines(out)
+' "$dst" "$tmp"; then
+    rm -f "$tmp"
+    printf 'left alone   %s — addendum block is malformed, remove it by hand\n' "$dst"
+    KEPT=$((KEPT + 1))
+    return 0
+  fi
+
+  cat "$tmp" >"$dst"
+  rm -f "$tmp"
+  printf 'removed      %s -> addendum block\n' "$dst"
+  REMOVED=$((REMOVED + 1))
+  return 0
+}
+
 printf 'bundle       %s\n' "$BUNDLE_ROOT"
 if [[ "$DRY_RUN" == 1 ]]; then
   printf 'mode         dry run — nothing will be changed\n'
@@ -129,8 +197,11 @@ printf '\n'
 unlink_one "$PREFIX/ccd"
 unlink_one "$PREFIX/ccw"
 unlink_one "$PREFIX/orchestrate-doctor"
-unlink_one "$CLAUDE_DIR/agents/orchestrator.md"
-unlink_one "$CLAUDE_DIR/skills/orchestrate"
+unlink_one "$COPILOT_DIR/agents/orchestrator.md"
+unlink_one "$COPILOT_DIR/agents/pre-pr-reviewer.md"
+unlink_one "$COPILOT_DIR/skills/orchestrate"
+unlink_one "$COPILOT_DIR/skills/pre-pr-review"
+remove_addendum
 
 printf '\nsummary      %d removed, %d left alone, %d not present\n' "$REMOVED" "$KEPT" "$ABSENT"
 printf 'note         the bundle itself at %s is untouched\n' "$BUNDLE_ROOT"
