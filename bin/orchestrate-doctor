@@ -71,6 +71,7 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+LIBRARY_DIR="$COPILOT_DIR/skill-library"
 N_PASS=0
 N_WARN=0
 N_FAIL=0
@@ -176,21 +177,79 @@ check_installed() {
   fi
 }
 
-check_installed "orchestrator agent installed" \
-  "$COPILOT_DIR/agents/orchestrator.md" \
-  "$BUNDLE_ROOT/agents/orchestrator.md"
+check_library_install() {
+  local label="$1" dst="$2" library_entry="$3" source="$4" first second actual
+  if [ ! -L "$dst" ]; then
+    fail "$label" "$dst is not a symlink — rerun ./install.sh"
+    return 0
+  fi
+  first="$(readlink "$dst")"
+  if [ "$first" != "$library_entry" ]; then
+    fail "$label" "$dst points to $first, not the canonical library entry $library_entry — rerun ./install.sh --force"
+    return 0
+  fi
+  if [ ! -L "$library_entry" ]; then
+    fail "$label" "$library_entry is not a symlink into this bundle — rerun ./install.sh"
+    return 0
+  fi
+  second="$(readlink "$library_entry")"
+  actual="$(resolve_path "$library_entry")"
+  if [ "$second" != "$source" ] || [ "$actual" != "$source" ]; then
+    fail "$label" "$library_entry does not resolve to $source — rerun ./install.sh --force"
+    return 0
+  fi
+  pass "$label" "$dst -> $library_entry -> $source"
+}
 
-check_installed "orchestrate skill installed" \
-  "$COPILOT_DIR/skills/orchestrate" \
-  "$BUNDLE_ROOT/skills/orchestrate"
+check_registration() {
+  local name="$1" output
+  if ! output="$(python3 "$BUNDLE_ROOT/lib/library_registry.py" check \
+      --library "$LIBRARY_DIR" --bundle "$BUNDLE_ROOT" --name "$name" 2>&1)"; then
+    fail "$name registered" "$output — rerun ./install.sh"
+  else
+    pass "$name registered" "$LIBRARY_DIR/library.json"
+  fi
+}
 
-check_installed "pre-pr-reviewer agent installed" \
-  "$COPILOT_DIR/agents/pre-pr-reviewer.md" \
-  "$BUNDLE_ROOT/agents/pre-pr-reviewer.md"
+if [ -d "$LIBRARY_DIR" ]; then
+  check_library_install "orchestrator agent installed" \
+    "$COPILOT_DIR/agents/orchestrator.md" \
+    "$LIBRARY_DIR/agents/orchestrator.md" \
+    "$BUNDLE_ROOT/agents/orchestrator.md"
+  check_library_install "orchestrate skill installed" \
+    "$COPILOT_DIR/skills/orchestrate" \
+    "$LIBRARY_DIR/skills/orchestrate" \
+    "$BUNDLE_ROOT/skills/orchestrate"
+  check_library_install "pre-pr-reviewer agent installed" \
+    "$COPILOT_DIR/agents/pre-pr-reviewer.md" \
+    "$LIBRARY_DIR/agents/pre-pr-reviewer.md" \
+    "$BUNDLE_ROOT/agents/pre-pr-reviewer.md"
+  check_library_install "pre-pr-review skill installed" \
+    "$COPILOT_DIR/skills/pre-pr-review" \
+    "$LIBRARY_DIR/skills/pre-pr-review" \
+    "$BUNDLE_ROOT/skills/pre-pr-review"
 
-check_installed "pre-pr-review skill installed" \
-  "$COPILOT_DIR/skills/pre-pr-review" \
-  "$BUNDLE_ROOT/skills/pre-pr-review"
+  if command -v python3 >/dev/null 2>&1; then
+    check_registration orchestrator
+    check_registration orchestrate
+    check_registration pre-pr-reviewer
+    check_registration pre-pr-review
+  fi
+else
+  warn "canonical skill library" "$LIBRARY_DIR not found — direct-link compatibility mode is active; install librarian to enable discovery"
+  check_installed "orchestrator agent installed" \
+    "$COPILOT_DIR/agents/orchestrator.md" \
+    "$BUNDLE_ROOT/agents/orchestrator.md"
+  check_installed "orchestrate skill installed" \
+    "$COPILOT_DIR/skills/orchestrate" \
+    "$BUNDLE_ROOT/skills/orchestrate"
+  check_installed "pre-pr-reviewer agent installed" \
+    "$COPILOT_DIR/agents/pre-pr-reviewer.md" \
+    "$BUNDLE_ROOT/agents/pre-pr-reviewer.md"
+  check_installed "pre-pr-review skill installed" \
+    "$COPILOT_DIR/skills/pre-pr-review" \
+    "$BUNDLE_ROOT/skills/pre-pr-review"
+fi
 
 # ------------------------------------------------- 9/10. ccd and ccw on PATH
 check_on_path() {

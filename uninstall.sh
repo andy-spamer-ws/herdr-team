@@ -90,9 +90,11 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+LIBRARY_DIR="$COPILOT_DIR/skill-library"
 REMOVED=0
 KEPT=0
 ABSENT=0
+FAILED=0
 
 unlink_one() {
   local dst="$1" target
@@ -188,6 +190,20 @@ with open(sys.argv[2], "w", encoding="utf-8") as fh:
   return 0
 }
 
+unregister_library() {
+  local output args
+  args=(unregister --library "$LIBRARY_DIR")
+  if [[ "$DRY_RUN" == 1 ]]; then
+    args+=(--dry-run)
+  fi
+  if ! output="$(python3 "$BUNDLE_ROOT/lib/library_registry.py" "${args[@]}" 2>&1)"; then
+    printf 'FAILED       update %s/library.json — %s\n' "$LIBRARY_DIR" "$output"
+    FAILED=$((FAILED + 1))
+    return 1
+  fi
+  printf '%s\n' "$output"
+}
+
 printf 'bundle       %s\n' "$BUNDLE_ROOT"
 if [[ "$DRY_RUN" == 1 ]]; then
   printf 'mode         dry run — nothing will be changed\n'
@@ -201,7 +217,18 @@ unlink_one "$COPILOT_DIR/agents/orchestrator.md"
 unlink_one "$COPILOT_DIR/agents/pre-pr-reviewer.md"
 unlink_one "$COPILOT_DIR/skills/orchestrate"
 unlink_one "$COPILOT_DIR/skills/pre-pr-review"
+if [[ -d "$LIBRARY_DIR" ]]; then
+  unlink_one "$LIBRARY_DIR/agents/orchestrator.md"
+  unlink_one "$LIBRARY_DIR/agents/pre-pr-reviewer.md"
+  unlink_one "$LIBRARY_DIR/skills/orchestrate"
+  unlink_one "$LIBRARY_DIR/skills/pre-pr-review"
+  unregister_library || true
+fi
 remove_addendum
 
-printf '\nsummary      %d removed, %d left alone, %d not present\n' "$REMOVED" "$KEPT" "$ABSENT"
+printf '\nsummary      %d removed, %d left alone, %d not present, %d failed\n' "$REMOVED" "$KEPT" "$ABSENT" "$FAILED"
 printf 'note         the bundle itself at %s is untouched\n' "$BUNDLE_ROOT"
+
+if [[ "$FAILED" -gt 0 ]]; then
+  exit 1
+fi
