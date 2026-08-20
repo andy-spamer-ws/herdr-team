@@ -61,20 +61,27 @@ itself. The skill is what tells it how to dispatch properly.
 ./install.sh
 ```
 
-It creates seven symlinks, all pointing back into the bundle:
+When `<copilot-dir>/skill-library` exists, the Copilot artefacts are registered
+in its `library.json` and use two symlink hops. The library entries point into
+this bundle, so the source tree remains the only editable copy:
 
 | Symlink | Target |
 |---------|--------|
 | `<prefix>/ccd` | `<bundle>/bin/ccd` |
 | `<prefix>/ccw` | `<bundle>/bin/ccw` |
 | `<prefix>/orchestrate-doctor` | `<bundle>/bin/orchestrate-doctor` |
-| `<copilot-dir>/agents/orchestrator.md` | `<bundle>/agents/orchestrator.md` |
-| `<copilot-dir>/agents/pre-pr-reviewer.md` | `<bundle>/agents/pre-pr-reviewer.md` |
-| `<copilot-dir>/skills/orchestrate` | `<bundle>/skills/orchestrate` |
-| `<copilot-dir>/skills/pre-pr-review` | `<bundle>/skills/pre-pr-review` |
+| `<copilot-dir>/agents/orchestrator.md` | `<copilot-dir>/skill-library/agents/orchestrator.md` |
+| `<copilot-dir>/agents/pre-pr-reviewer.md` | `<copilot-dir>/skill-library/agents/pre-pr-reviewer.md` |
+| `<copilot-dir>/skills/orchestrate` | `<copilot-dir>/skill-library/skills/orchestrate` |
+| `<copilot-dir>/skills/pre-pr-review` | `<copilot-dir>/skill-library/skills/pre-pr-review` |
 
 and appends one managed block to `<copilot-dir>/copilot-instructions.md` — see
 [Vendored prompt](#vendored-prompt).
+
+The registry update is atomic and preserves a pre-install backup for uninstall.
+If the skill library is absent, installation falls back to direct bundle links
+with a warning; the commands and Copilot artefacts still work, but the
+artefacts are not discoverable through librarian.
 
 Options:
 
@@ -106,10 +113,12 @@ bundle and rerun `install.sh --force`.
 ```
 
 It removes a symlink only when its resolved target is inside this bundle.
-Anything else is reported and left alone. The addendum block is cut out of
-`copilot-instructions.md` by its BEGIN/END markers, leaving everything else in
-that file byte-for-byte intact; if the markers are damaged it says so and
-changes nothing. The bundle directory itself is never touched.
+Anything else is reported and left alone. Both library link hops and the four
+owned registry entries are unwound; unrelated library entries are preserved.
+The addendum block is cut out of `copilot-instructions.md` by its BEGIN/END
+markers, leaving everything else in that file byte-for-byte intact; if the
+markers are damaged it says so and changes nothing. The bundle directory itself
+is never touched.
 
 ## Roles
 
@@ -230,16 +239,14 @@ Checks: bash version (warn only, under 3.2), `herdr` on PATH **and at least
 0.8.0**, `copilot` accepted as a `herdr agent start --kind`, `copilot` on PATH,
 `python3` on PATH, `HERDR_ENV` (informational — it is only set inside a herdr
 pane), the addendum source being readable and its block being installed,
-`orchestrator.md` and the `orchestrate` skill installed and resolving back into
-this bundle, `pre-pr-reviewer.md` and the `pre-pr-review` skill installed and
-resolving back into this bundle, and `ccd` and `ccw` on PATH resolving back
-into this bundle.
+the full two-hop library chain for both agents and both skills, all four
+`library.json` registrations, and `ccd` and `ccw` on PATH resolving back into
+this bundle. Without a skill library, the compatible direct-link installation
+is checked instead and reported as a warning.
 
-For the last six, severity depends on what is actually there. Missing entirely
-is a `FAIL` — run `./install.sh`. Resolving into this bundle is a `PASS`.
-Present and working but resolving somewhere else is a `WARN`: that is the
-expected state when this bundle sits alongside an existing install, nothing is
-broken, and `./install.sh --force` is how you switch over if you want to.
+Missing artefacts, broken library hops, and stale or absent registrations are a
+`FAIL` — run `./install.sh`. A direct-link install is accepted only when the
+canonical library itself is absent.
 
 It exits 0 when nothing failed, 1 otherwise. Warnings never change the exit
 status, so a run with warnings and no failures still reads as ready.
