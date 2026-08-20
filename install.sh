@@ -1,20 +1,31 @@
 #!/usr/bin/env bash
-# install.sh — symlink the herdr-team bundle into your PATH and ~/.claude.
+# install.sh — symlink the herdr-team bundle into your PATH and ~/.copilot.
 #
-# Creates five symlinks, all pointing back into this bundle:
+# Creates seven symlinks, all pointing back into this bundle:
 #
 #   <prefix>/ccd                   -> <bundle>/bin/ccd
 #   <prefix>/ccw                   -> <bundle>/bin/ccw
 #   <prefix>/orchestrate-doctor    -> <bundle>/bin/orchestrate-doctor
-#   <claude-dir>/agents/orchestrator.md -> <bundle>/agents/orchestrator.md
-#   <claude-dir>/skills/orchestrate     -> <bundle>/skills/orchestrate
+#   <copilot-dir>/agents/orchestrator.md    -> <bundle>/agents/orchestrator.md
+#   <copilot-dir>/agents/pre-pr-reviewer.md -> <bundle>/agents/pre-pr-reviewer.md
+#   <copilot-dir>/skills/orchestrate    -> <bundle>/skills/orchestrate
+#   <copilot-dir>/skills/pre-pr-review  -> <bundle>/skills/pre-pr-review
 #
-# usage: ./install.sh [--prefix DIR] [--claude-dir DIR] [--force] [--dry-run]
+# and writes one managed block:
 #
-#   --prefix DIR      where ccd/ccw/orchestrate-doctor go   (default: $HOME/bin)
-#   --claude-dir DIR  your Claude Code config dir           (default: $HOME/.claude)
-#   --force           replace symlinks that point elsewhere
-#   --dry-run         print every action, change nothing
+#   <copilot-dir>/copilot-instructions.md   the SR communication addendum
+#
+# The addendum is a copied block rather than a symlink because Copilot has no
+# `--append-system-prompt` and the instructions file is shared with everything
+# else you have put in it. It is delimited by BEGIN/END markers so uninstall.sh
+# can remove exactly what was added and nothing else.
+#
+# usage: ./install.sh [--prefix DIR] [--copilot-dir DIR] [--force] [--dry-run]
+#
+#   --prefix DIR       where ccd/ccw/orchestrate-doctor go   (default: $HOME/bin)
+#   --copilot-dir DIR  your Copilot CLI config dir           (default: $HOME/.copilot)
+#   --force            replace symlinks that point elsewhere
+#   --dry-run          print every action, change nothing
 #
 # Idempotent: running it twice is a no-op, not an error. An existing regular
 # file or directory at a destination is never clobbered, with or without
@@ -44,35 +55,39 @@ resolve_dir() {
 BUNDLE_ROOT="$(resolve_dir "${BASH_SOURCE[0]}")"
 
 PREFIX="$HOME/bin"
-CLAUDE_DIR="$HOME/.claude"
+COPILOT_DIR="$HOME/.copilot"
 FORCE=0
 DRY_RUN=0
 
+# Markers must match uninstall.sh and orchestrate-doctor exactly.
+ADDENDUM_BEGIN='<!-- BEGIN herdr-team SR addendum (managed) -->'
+ADDENDUM_END='<!-- END herdr-team SR addendum (managed) -->'
+
 usage() {
   cat >&2 <<'EOF'
-usage: ./install.sh [--prefix DIR] [--claude-dir DIR] [--force] [--dry-run]
+usage: ./install.sh [--prefix DIR] [--copilot-dir DIR] [--force] [--dry-run]
 
-  --prefix DIR      where ccd/ccw/orchestrate-doctor go   (default: $HOME/bin)
-  --claude-dir DIR  your Claude Code config dir           (default: $HOME/.claude)
-  --force           replace symlinks that point elsewhere
-  --dry-run         print every action, change nothing
+  --prefix DIR       where ccd/ccw/orchestrate-doctor go   (default: $HOME/bin)
+  --copilot-dir DIR  your Copilot CLI config dir           (default: $HOME/.copilot)
+  --force            replace symlinks that point elsewhere
+  --dry-run          print every action, change nothing
 EOF
   exit 2
 }
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --prefix)     PREFIX="${2:-}"; shift 2 ;;
-    --claude-dir) CLAUDE_DIR="${2:-}"; shift 2 ;;
-    --force)      FORCE=1; shift ;;
-    --dry-run)    DRY_RUN=1; shift ;;
-    -h|--help)    usage ;;
+    --prefix)      PREFIX="${2:-}"; shift 2 ;;
+    --copilot-dir) COPILOT_DIR="${2:-}"; shift 2 ;;
+    --force)       FORCE=1; shift ;;
+    --dry-run)     DRY_RUN=1; shift ;;
+    -h|--help)     usage ;;
     *) printf 'install.sh: unknown option %s\n' "$1" >&2; usage ;;
   esac
 done
 
-[[ -n "$PREFIX" ]]     || { printf 'install.sh: --prefix needs a value\n' >&2; usage; }
-[[ -n "$CLAUDE_DIR" ]] || { printf 'install.sh: --claude-dir needs a value\n' >&2; usage; }
+[[ -n "$PREFIX" ]]      || { printf 'install.sh: --prefix needs a value\n' >&2; usage; }
+[[ -n "$COPILOT_DIR" ]] || { printf 'install.sh: --copilot-dir needs a value\n' >&2; usage; }
 
 LINKED=0
 ALREADY=0
@@ -154,9 +169,53 @@ link_one() {
   return 0
 }
 
+install_addendum() {
+  local src="$BUNDLE_ROOT/prompts/sr_opus_5_system_prompt.md"
+  local dst="$COPILOT_DIR/copilot-instructions.md"
+
+  if [[ ! -r "$src" ]]; then
+    printf 'FAILED       addendum source unreadable at %s\n' "$src"
+    FAILED=$((FAILED + 1))
+    return 1
+  fi
+
+  if [[ -e "$dst" && ! -f "$dst" ]]; then
+    printf 'BLOCKED      %s exists and is not a regular file — move it aside, then rerun\n' "$dst"
+    BLOCKED=$((BLOCKED + 1))
+    return 1
+  fi
+
+  if [[ -f "$dst" ]] && grep -qF "$ADDENDUM_BEGIN" "$dst"; then
+    printf 'ok           %s -> addendum block already present\n' "$dst"
+    ALREADY=$((ALREADY + 1))
+    return 0
+  fi
+
+  if [[ "$DRY_RUN" == 1 ]]; then
+    printf 'would append addendum block to %s\n' "$dst"
+    LINKED=$((LINKED + 1))
+    return 0
+  fi
+
+  local err
+  if ! err="$( { [[ -f "$dst" ]] && printf '\n'
+      printf '%s\n' "$ADDENDUM_BEGIN"
+      cat "$src"
+      # the vendored addendum has no trailing newline, so force one: the END
+      # marker must start its own line or uninstall.sh cannot match it
+      printf '\n%s\n' "$ADDENDUM_END"; } >>"$dst" 2>&1 )"; then
+    printf 'FAILED       append addendum to %s — %s\n' "$dst" "$err"
+    FAILED=$((FAILED + 1))
+    return 1
+  fi
+  printf 'appended     %s -> addendum block\n' "$dst"
+  LINKED=$((LINKED + 1))
+  return 0
+}
+
 printf 'bundle       %s\n' "$BUNDLE_ROOT"
 printf 'prefix       %s\n' "$PREFIX"
-printf 'claude dir   %s\n' "$CLAUDE_DIR"
+printf 'copilot dir  %s\n' "$COPILOT_DIR"
 if [[ "$DRY_RUN" == 1 ]]; then
   printf 'mode         dry run — nothing will be changed\n'
 fi
@@ -168,12 +227,18 @@ if ensure_dir "$PREFIX"; then
   link_one "$BUNDLE_ROOT/bin/orchestrate-doctor" "$PREFIX/orchestrate-doctor" || true
 fi
 
-if ensure_dir "$CLAUDE_DIR/agents"; then
-  link_one "$BUNDLE_ROOT/agents/orchestrator.md" "$CLAUDE_DIR/agents/orchestrator.md" || true
+if ensure_dir "$COPILOT_DIR/agents"; then
+  link_one "$BUNDLE_ROOT/agents/orchestrator.md" "$COPILOT_DIR/agents/orchestrator.md" || true
+  link_one "$BUNDLE_ROOT/agents/pre-pr-reviewer.md" "$COPILOT_DIR/agents/pre-pr-reviewer.md" || true
 fi
 
-if ensure_dir "$CLAUDE_DIR/skills"; then
-  link_one "$BUNDLE_ROOT/skills/orchestrate" "$CLAUDE_DIR/skills/orchestrate" || true
+if ensure_dir "$COPILOT_DIR/skills"; then
+  link_one "$BUNDLE_ROOT/skills/orchestrate" "$COPILOT_DIR/skills/orchestrate" || true
+  link_one "$BUNDLE_ROOT/skills/pre-pr-review" "$COPILOT_DIR/skills/pre-pr-review" || true
+fi
+
+if ensure_dir "$COPILOT_DIR"; then
+  install_addendum || true
 fi
 
 printf '\nsummary      %d linked, %d already correct, %d blocked, %d failed\n' "$LINKED" "$ALREADY" "$BLOCKED" "$FAILED"

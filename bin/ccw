@@ -1,24 +1,31 @@
 #!/usr/bin/env bash
-# ccw — launch a named Claude worker in a herdr pane at a chosen tier.
+# ccw — launch a named GitHub Copilot CLI worker in a herdr pane at a chosen role.
 #
 # Sibling of ccd. ccd starts an orchestrator for you; ccw starts a worker for
-# the orchestrator. Every worker gets: a name, a tier (the model dial), the SR
-# addendum system prompt, and skipped permissions.
+# the orchestrator. Every worker gets: a name, a role (the model dial) and
+# skipped permissions.
 #
 # Part of the herdr-team bundle. This script may be invoked through a symlink
 # (install.sh puts one in your PATH); it resolves that symlink back to the
-# bundle root and reads the addendum from <bundle>/prompts/.
+# bundle root.
 #
-#   ccw diagnose-89 --tier diagnose --cwd /path/to/repo
-#   ccw fix-90 --tier build --cwd /path/to/repo --split right --no-focus
-#   ccw issue-89 --tier hard --cwd /path/to/repo --new-tab issue-89-90
-#   ccw probe --tier mechanical --cwd . --dry-run
+#   ccw analyse-89 --role analyse --cwd /path/to/repo
+#   ccw fix-90 --role build --cwd /path/to/repo --split right --no-focus
+#   ccw issue-89 --role hard --cwd /path/to/repo --new-tab issue-89-90
+#   ccw probe --role mechanical --cwd . --dry-run
 #
-# Tiers — the model is the dial, effort is a deviation:
-#   mechanical  --model haiku    (no --effort; haiku rejects it)
-#   build       --model sonnet   (already defaults to high)
-#   diagnose    --model opus     (already defaults to high)
-#   hard        --model opus --effort xhigh
+# Roles — the model is the dial, effort is a deviation:
+#   mechanical  gpt-5.6-luna   --effort low
+#   build       claude-sonnet-5 --effort medium
+#   verify      gpt-5.6-terra  --effort medium
+#   review      claude-opus-5  --effort xhigh
+#   analyse     claude-opus-5  --effort xhigh
+#   hard        claude-opus-5  --effort max    --context long_context
+#   orchestrator gpt-5.6-sol   --effort high   --context long_context
+#
+# Requires herdr 0.8.0 or newer: `herdr agent start` takes --kind and --pane and
+# never creates layout, so ccw acquires the pane itself (tab create or pane
+# split) and then starts copilot into it.
 
 set -euo pipefail
 
@@ -47,41 +54,48 @@ resolve_bundle_root() {
 
 BUNDLE_ROOT="$(resolve_bundle_root "${BASH_SOURCE[0]}")"
 
-ADDENDUM="${CCW_ADDENDUM:-$BUNDLE_ROOT/prompts/sr_opus_5_system_prompt.md}"
+# shellcheck source=../lib/roles.sh
+. "$BUNDLE_ROOT/lib/roles.sh"
+
+START_TIMEOUT="${CCW_START_TIMEOUT:-120000}"
 
 usage() {
   cat >&2 <<'EOF'
-usage: ccw <name> --tier <mechanical|build|diagnose|hard> [--cwd PATH]
-           [--split right|down] [--tab ID] [--new-tab LABEL]
-           [--focus|--no-focus] [--dry-run] [-- extra claude args]
+usage: ccw <name> --role <mechanical|build|verify|review|analyse|hard|orchestrator>
+           [--cwd PATH] [--split right|down] [--tab ID] [--new-tab LABEL]
+           [--focus|--no-focus] [--dry-run] [-- extra copilot args]
 
-tiers:
-  mechanical   --model haiku            rename, move, delete, mechanical edits
-  build        --model sonnet           write the code, write the tests
-  diagnose     --model opus             find out why, read across modules
-  hard         --model opus --effort xhigh   design, tricky concurrency, migrations
+roles:
+  mechanical    gpt-5.6-luna    --effort low       rename, move, delete, mechanical edits
+  build         claude-sonnet-5 --effort medium    write the code, write the tests
+  verify        gpt-5.6-terra   --effort medium    run the DoD, read the diff, pass/fail
+  review        claude-opus-5   --effort xhigh     adversarial pre-PR review, find the unspecified
+  analyse       claude-opus-5   --effort xhigh     find out why, read across modules
+  hard          claude-opus-5   --effort max       design, tricky concurrency, migrations
+  orchestrator  gpt-5.6-sol     --effort high      plan and dispatch (ccd uses this)
+
+`--tier` is accepted as an alias for `--role`.
 
 env:
-  CCW_ADDENDUM   override the addendum system prompt path
-                 (default: <bundle>/prompts/sr_opus_5_system_prompt.md)
+  CCW_START_TIMEOUT   ms to wait for copilot to become interactive (default 120000)
 EOF
   exit 2
 }
 
 # ------------------------------------------------------------------ arg parse
 NAME=""
-TIER=""
+ROLE=""
 CWD="$PWD"
 SPLIT=""
 TAB=""
 NEW_TAB=""
-FOCUS=""
+FOCUS="--no-focus"
 DRY_RUN=0
 extra=()
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --tier)     TIER="${2:-}"; shift 2 ;;
+    --role|--tier) ROLE="${2:-}"; shift 2 ;;
     --cwd)      CWD="${2:-}"; shift 2 ;;
     --split)    SPLIT="${2:-}"; shift 2 ;;
     --tab)      TAB="${2:-}"; shift 2 ;;
@@ -101,15 +115,20 @@ while [[ $# -gt 0 ]]; do
 done
 
 [[ -n "$NAME" ]] || { printf 'ccw: missing <name>\n' >&2; usage; }
-[[ -n "$TIER" ]] || { printf 'ccw: missing --tier\n' >&2; usage; }
+[[ -n "$ROLE" ]] || { printf 'ccw: missing --role\n' >&2; usage; }
 
-case "$TIER" in
-  mechanical) MODEL=haiku;  EFFORT="" ;;
-  build)      MODEL=sonnet; EFFORT="" ;;
-  diagnose)   MODEL=opus;   EFFORT="" ;;
-  hard)       MODEL=opus;   EFFORT="xhigh" ;;
-  *) printf 'ccw: unknown tier %s\n' "$TIER" >&2; usage ;;
-esac
+# herdr requires agent names to match [a-z][a-z0-9_-]{0,31} and be unique
+if ! printf '%s' "$NAME" | grep -Eq '^[a-z][a-z0-9_-]{0,31}$'; then
+  printf 'ccw: invalid name %s — herdr requires [a-z][a-z0-9_-]{0,31}\n' "$NAME" >&2
+  exit 2
+fi
+
+# ------------------------------------------------------------------ role table
+# The mapping itself lives in lib/roles.sh so ccd and ccw cannot drift apart.
+if ! ROLE_FLAGS="$(roles_flags "$ROLE")"; then
+  printf 'ccw: unknown role %s\n' "$ROLE" >&2; usage
+fi
+MODEL="$(roles_model "$ROLE")"
 
 if [[ -n "$SPLIT" && "$SPLIT" != right && "$SPLIT" != down ]]; then
   printf 'ccw: --split must be right or down\n' >&2; usage
@@ -119,49 +138,29 @@ if [[ -n "$TAB" && -n "$NEW_TAB" ]]; then
   printf 'ccw: --tab and --new-tab are mutually exclusive\n' >&2; usage
 fi
 
-# ---------------------------------------------------------------- claude argv
-claude_argv=(claude --model "$MODEL")
-[[ -n "$EFFORT" ]] && claude_argv+=(--effort "$EFFORT")
-
-ADDENDUM_TEXT=""
-if [[ -r "$ADDENDUM" ]]; then
-  ADDENDUM_TEXT="$(cat "$ADDENDUM")"
-  claude_argv+=(--append-system-prompt "$ADDENDUM_TEXT")
-else
-  printf 'ccw: addendum system prompt not readable at %s — continuing without it\n' "$ADDENDUM" >&2
-fi
-
-claude_argv+=(--dangerously-skip-permissions)
-[[ ${#extra[@]:-0} -gt 0 ]] && claude_argv+=("${extra[@]}")
-
-# ----------------------------------------------------------------- placement
-placement=()
-[[ -n "$SPLIT" ]] && placement+=(--split "$SPLIT")
-[[ -n "$FOCUS" ]] && placement+=("$FOCUS")
+# --------------------------------------------------------------- copilot argv
+# Copilot has no --append-system-prompt. The SR communication addendum is
+# installed once, globally, as a managed block in the Copilot instructions file
+# (see install.sh) and applies to every worker without a per-launch flag.
+copilot_argv=($ROLE_FLAGS --allow-all)
+copilot_argv+=(${extra[@]+"${extra[@]}"})
 
 # ------------------------------------------------------------------- dry run
 if [[ "$DRY_RUN" == 1 ]]; then
   if [[ -n "$NEW_TAB" ]]; then
     printf 'herdr tab create --label %q --cwd %q --no-focus\n' "$NEW_TAB" "$CWD"
-    printf '# then, with TAB_ID from that response:\n'
-    printf 'herdr agent start %q --cwd %q --tab "$TAB_ID"' "$NAME" "$CWD"
+    printf '# then, with PANE_ID from .result.root_pane.pane_id:\n'
+  elif [[ -n "$TAB" ]]; then
+    printf 'herdr pane split --pane <first pane of %s> --direction %s --cwd %q %s\n' \
+      "$TAB" "${SPLIT:-right}" "$CWD" "$FOCUS"
+    printf '# then, with PANE_ID from .result.pane.pane_id:\n'
   else
-    printf 'herdr agent start %q --cwd %q' "$NAME" "$CWD"
-    [[ -n "$TAB" ]] && printf ' --tab %q' "$TAB"
+    printf 'herdr pane split --current --direction %s --cwd %q %s\n' \
+      "${SPLIT:-right}" "$CWD" "$FOCUS"
+    printf '# then, with PANE_ID from .result.pane.pane_id:\n'
   fi
-  for a in ${placement[@]+"${placement[@]}"}; do printf ' %q' "$a"; done
-  printf ' --'
-  # the addendum body is elided — it is ~6KB of markdown and floods both the
-  # terminal and, when an orchestrator runs this, its context window.
-  addendum_size=$(printf '%s' "$ADDENDUM_TEXT" \
-    | wc -c | awk '{printf "%.1fK", $1/1024}')
-  for a in "${claude_argv[@]}"; do
-    if [[ -n "$ADDENDUM_TEXT" && "$a" == "$ADDENDUM_TEXT" ]]; then
-      printf ' <addendum: %s from %s>' "$addendum_size" "$ADDENDUM"
-    else
-      printf ' %q' "$a"
-    fi
-  done
+  printf 'herdr agent start %q --kind copilot --pane "$PANE_ID" --timeout %q --' "$NAME" "$START_TIMEOUT"
+  for a in "${copilot_argv[@]}"; do printf ' %q' "$a"; done
   printf '\n'
   exit 0
 fi
@@ -172,45 +171,95 @@ command -v herdr >/dev/null 2>&1 || {
   exit 1
 }
 
+json_get() {
+  # json_get <dotted.path> — reads stdin, prints the value or fails
+  python3 -c '
+import json, sys
+try:
+    data = json.load(sys.stdin)
+except Exception as e:
+    print("ccw: herdr response was not JSON: %s" % e, file=sys.stderr)
+    sys.exit(1)
+node = data
+for key in sys.argv[1].split("."):
+    if not isinstance(node, dict) or key not in node:
+        print("ccw: missing %s in herdr response" % sys.argv[1], file=sys.stderr)
+        print(json.dumps(data, indent=2)[:2000], file=sys.stderr)
+        sys.exit(1)
+    node = node[key]
+print(node)
+' "$1"
+}
+
+run_herdr() {
+  # run_herdr <dotted.path> <herdr args...> — runs herdr, returns one JSON field
+  local path="$1"; shift
+  local out
+  if ! out=$("$@" 2>&1); then
+    printf 'ccw: %s failed\n%s\n' "$*" "$out" >&2
+    return 1
+  fi
+  printf '%s' "$out" | json_get "$path"
+}
+
+# ------------------------------------------------------------ acquire a pane
+# herdr 0.8.0's `agent start` never creates layout, so the pane must exist and
+# be sitting at an interactive shell prompt before the agent goes in.
+CREATED_TAB=""
 if [[ -n "$NEW_TAB" ]]; then
-  TAB=$(herdr tab create --label "$NEW_TAB" --cwd "$CWD" --no-focus \
-    | python3 -c 'import json,sys; print(json.load(sys.stdin)["result"]["tab"]["tab_id"])')
+  out=$(herdr tab create --label "$NEW_TAB" --cwd "$CWD" --no-focus 2>&1) || {
+    printf 'ccw: herdr tab create failed\n%s\n' "$out" >&2; exit 1
+  }
+  PANE_ID=$(printf '%s' "$out" | json_get result.root_pane.pane_id) || exit 1
+  TAB=$(printf '%s' "$out" | json_get result.tab.tab_id) || exit 1
+  CREATED_TAB="$TAB"
+elif [[ -n "$TAB" ]]; then
+  # split the first pane of the named tab; splitting a busy pane is safe, the
+  # new pane is always a fresh shell
+  host_pane=$(herdr pane list 2>/dev/null | python3 -c '
+import json, sys
+try:
+    panes = json.load(sys.stdin)["result"]["panes"]
+except Exception:
+    sys.exit(1)
+for p in panes:
+    if p.get("tab_id") == sys.argv[1]:
+        print(p["pane_id"]); sys.exit(0)
+sys.exit(1)
+' "$TAB") || {
+    printf 'ccw: no pane found in tab %s\n' "$TAB" >&2; exit 1
+  }
+  PANE_ID=$(run_herdr result.pane.pane_id \
+    herdr pane split --pane "$host_pane" --direction "${SPLIT:-right}" \
+      --cwd "$CWD" "$FOCUS") || exit 1
+else
+  if [[ -n "${HERDR_PANE_ID:-}" ]]; then
+    PANE_ID=$(run_herdr result.pane.pane_id \
+      herdr pane split --current --direction "${SPLIT:-right}" \
+        --cwd "$CWD" "$FOCUS") || exit 1
+  else
+    printf 'ccw: HERDR_PANE_ID is not set — run ccw from inside a herdr pane, or pass --tab/--new-tab\n' >&2
+    exit 1
+  fi
 fi
 
-start=(herdr agent start "$NAME" --cwd "$CWD")
-[[ -n "$TAB" ]] && start+=(--tab "$TAB")
-start+=(${placement[@]+"${placement[@]}"})
-start+=(-- "${claude_argv[@]}")
+# ------------------------------------------------------------- start copilot
+# Leaving a bare shell pane behind on failure is worse than no pane at all.
+cleanup_pane() {
+  herdr pane close "$PANE_ID" >/dev/null 2>&1 || true
+}
 
-# Capture herdr response and parse it
+start=(herdr agent start "$NAME" --kind copilot --pane "$PANE_ID"
+       --timeout "$START_TIMEOUT" -- "${copilot_argv[@]}")
+
 if ! output=$("${start[@]}" 2>&1); then
   printf 'ccw: herdr agent start failed\n%s\n' "$output" >&2
+  cleanup_pane
   exit 1
 fi
 
-# Parse the JSON to extract pane_id and agent_name
-if ! parse_result=$(printf '%s' "$output" | python3 -c 'import json,sys
-try:
-  data = json.load(sys.stdin)
-  pane_id = data["result"]["agent"]["pane_id"]
-  agent_name = data["result"]["agent"]["name"]
-  print(f"{agent_name}\t{pane_id}")
-except KeyError as e:
-  print(f"error: missing key {e} in herdr response", file=sys.stderr)
-  print(json.dumps(data, indent=2), file=sys.stderr)
-  sys.exit(1)
-except Exception as e:
-  print(f"error: {e}", file=sys.stderr)
-  print(json.dumps(data, indent=2), file=sys.stderr)
-  sys.exit(1)
-'); then
-  printf 'ccw: failed to parse herdr response\n%s\n' "$parse_result" >&2
-  exit 1
-fi
+AGENT_NAME=$(printf '%s' "$output" | json_get result.agent.name) || { cleanup_pane; exit 1; }
 
-# Extract agent_name and pane_id from parse result
-AGENT_NAME=$(printf '%s' "$parse_result" | cut -f1)
-pane_id=$(printf '%s' "$parse_result" | cut -f2)
-
-# Print confirmation line
-printf 'started %s  pane %s  tier %s  model %s\n' "$AGENT_NAME" "$pane_id" "$TIER" "$MODEL"
+printf 'started %s  pane %s  role %s  model %s' "$AGENT_NAME" "$PANE_ID" "$ROLE" "$MODEL"
+[[ -n "$CREATED_TAB" ]] && printf '  tab %s' "$CREATED_TAB"
+printf '\n'

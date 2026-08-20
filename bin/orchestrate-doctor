@@ -17,9 +17,9 @@
 # Exit status: 0 if nothing failed, 1 otherwise. Warnings never change the exit
 # status.
 #
-# usage: orchestrate-doctor [--claude-dir DIR]
+# usage: orchestrate-doctor [--copilot-dir DIR]
 #
-#   --claude-dir DIR  your Claude Code config dir (default: $HOME/.claude)
+#   --copilot-dir DIR  your Copilot CLI config dir (default: $HOME/.copilot)
 
 set -uo pipefail
 
@@ -49,21 +49,24 @@ resolve_path() {
 SELF="$(resolve_path "${BASH_SOURCE[0]}")"
 BUNDLE_ROOT="$(cd -P "$(dirname "$SELF")/.." >/dev/null 2>&1 && pwd)"
 
-CLAUDE_DIR="$HOME/.claude"
+COPILOT_DIR="$HOME/.copilot"
+
+# Must match install.sh and uninstall.sh exactly.
+ADDENDUM_BEGIN='<!-- BEGIN herdr-team SR addendum (managed) -->'
 
 usage() {
   cat >&2 <<'EOF'
-usage: orchestrate-doctor [--claude-dir DIR]
+usage: orchestrate-doctor [--copilot-dir DIR]
 
-  --claude-dir DIR  your Claude Code config dir (default: $HOME/.claude)
+  --copilot-dir DIR  your Copilot CLI config dir (default: $HOME/.copilot)
 EOF
   exit 2
 }
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --claude-dir) CLAUDE_DIR="${2:-}"; shift 2 ;;
-    -h|--help)    usage ;;
+    --copilot-dir) COPILOT_DIR="${2:-}"; shift 2 ;;
+    -h|--help)     usage ;;
     *) printf 'orchestrate-doctor: unknown option %s\n' "$1" >&2; usage ;;
   esac
 done
@@ -77,7 +80,7 @@ warn() { printf 'WARN  %-34s %s\n' "$1" "$2"; N_WARN=$((N_WARN + 1)); }
 fail() { printf 'FAIL  %-34s %s\n' "$1" "$2"; N_FAIL=$((N_FAIL + 1)); }
 
 printf 'bundle       %s\n' "$BUNDLE_ROOT"
-printf 'claude dir   %s\n\n' "$CLAUDE_DIR"
+printf 'copilot dir  %s\n\n' "$COPILOT_DIR"
 
 # ------------------------------------------------------------- 1. bash version
 BASH_MAJOR="${BASH_VERSINFO[0]}"
@@ -89,22 +92,41 @@ else
 fi
 
 # --------------------------------------------------------- 2. herdr (required)
+# The dispatch shape ccw uses (agent start --kind/--pane) only exists in 0.8.0.
 if command -v herdr >/dev/null 2>&1; then
   HERDR_VERSION="$(herdr --version 2>&1 | head -n 1)"
-  if [ -n "$HERDR_VERSION" ]; then
-    pass "herdr on PATH" "$(command -v herdr) — $HERDR_VERSION"
-  else
+  HERDR_NUM="$(printf '%s' "$HERDR_VERSION" | grep -oE '[0-9]+\.[0-9]+' | head -n 1)"
+  if [ -z "$HERDR_VERSION" ]; then
     warn "herdr on PATH" "$(command -v herdr) — 'herdr --version' printed nothing"
+  elif [ -z "$HERDR_NUM" ]; then
+    warn "herdr on PATH" "$(command -v herdr) — $HERDR_VERSION (could not read a version number; 0.8.0+ is required)"
+  else
+    HERDR_MAJOR="${HERDR_NUM%%.*}"
+    HERDR_MINOR="${HERDR_NUM##*.}"
+    if [ "$HERDR_MAJOR" -gt 0 ] || [ "$HERDR_MINOR" -ge 8 ]; then
+      pass "herdr on PATH" "$(command -v herdr) — $HERDR_VERSION"
+    else
+      fail "herdr on PATH" "$HERDR_VERSION is below 0.8.0 — ccw needs 'agent start --kind/--pane'; run herdr update"
+    fi
   fi
 else
   fail "herdr on PATH" "herdr is a hard dependency — install it and reopen your shell"
 fi
 
-# -------------------------------------------------------- 3. claude (required)
-if command -v claude >/dev/null 2>&1; then
-  pass "claude on PATH" "$(command -v claude)"
+# ------------------------------------------- 2b. herdr knows the copilot kind
+if command -v herdr >/dev/null 2>&1; then
+  if herdr agent start --help 2>&1 | grep -q 'copilot'; then
+    pass "herdr copilot kind" "'copilot' is an accepted --kind"
+  else
+    fail "herdr copilot kind" "this herdr build does not list 'copilot' in agent start --kind — run herdr update"
+  fi
+fi
+
+# ------------------------------------------------------- 3. copilot (required)
+if command -v copilot >/dev/null 2>&1; then
+  pass "copilot on PATH" "$(command -v copilot)"
 else
-  fail "claude on PATH" "install Claude Code — ccd and ccw exec it directly"
+  fail "copilot on PATH" "install the GitHub Copilot CLI — ccd execs it and ccw starts it in panes"
 fi
 
 # ------------------------------------------------------- 4. python3 (required)
@@ -122,15 +144,24 @@ else
 fi
 
 # ------------------------------------------------------ 6. addendum (required)
-ADDENDUM_PATH="${CCW_ADDENDUM:-$BUNDLE_ROOT/prompts/sr_opus_5_system_prompt.md}"
-if [ -r "$ADDENDUM_PATH" ]; then
-  ADDENDUM_SIZE="$(wc -c <"$ADDENDUM_PATH" | awk '{printf "%.1fK", $1/1024}')"
-  pass "addendum readable" "$ADDENDUM_PATH ($ADDENDUM_SIZE)"
+# Copilot has no --append-system-prompt, so the addendum is a managed block in
+# the Copilot instructions file rather than a per-launch flag.
+ADDENDUM_SRC="$BUNDLE_ROOT/prompts/sr_opus_5_system_prompt.md"
+INSTRUCTIONS="$COPILOT_DIR/copilot-instructions.md"
+if [ ! -r "$ADDENDUM_SRC" ]; then
+  fail "addendum source readable" "$ADDENDUM_SRC missing from the bundle"
 else
-  fail "addendum readable" "$ADDENDUM_PATH missing — ccd/ccw still run, but without the SR prompt"
+  ADDENDUM_SIZE="$(wc -c <"$ADDENDUM_SRC" | awk '{printf "%.1fK", $1/1024}')"
+  pass "addendum source readable" "$ADDENDUM_SRC ($ADDENDUM_SIZE)"
 fi
 
-# ------------------------------------------- 7/8. installed into the claude dir
+if [ -f "$INSTRUCTIONS" ] && grep -qF "$ADDENDUM_BEGIN" "$INSTRUCTIONS"; then
+  pass "addendum installed" "$INSTRUCTIONS has the managed block"
+else
+  warn "addendum installed" "$INSTRUCTIONS has no herdr-team block — run ./install.sh; ccd and ccw still work, workers just lose the SR prompt"
+fi
+
+# ------------------------------------------ 7/8. installed into the copilot dir
 check_installed() {
   local label="$1" dst="$2" expected="$3" actual
   if [ ! -e "$dst" ] && [ ! -L "$dst" ]; then
@@ -146,12 +177,20 @@ check_installed() {
 }
 
 check_installed "orchestrator agent installed" \
-  "$CLAUDE_DIR/agents/orchestrator.md" \
+  "$COPILOT_DIR/agents/orchestrator.md" \
   "$BUNDLE_ROOT/agents/orchestrator.md"
 
 check_installed "orchestrate skill installed" \
-  "$CLAUDE_DIR/skills/orchestrate" \
+  "$COPILOT_DIR/skills/orchestrate" \
   "$BUNDLE_ROOT/skills/orchestrate"
+
+check_installed "pre-pr-reviewer agent installed" \
+  "$COPILOT_DIR/agents/pre-pr-reviewer.md" \
+  "$BUNDLE_ROOT/agents/pre-pr-reviewer.md"
+
+check_installed "pre-pr-review skill installed" \
+  "$COPILOT_DIR/skills/pre-pr-review" \
+  "$BUNDLE_ROOT/skills/pre-pr-review"
 
 # ------------------------------------------------- 9/10. ccd and ccw on PATH
 check_on_path() {
