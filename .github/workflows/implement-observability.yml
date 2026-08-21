@@ -3,20 +3,22 @@ name: Implement and review observability
 on:
   workflow_dispatch:
 
-permissions:
-  contents: write
-  copilot-requests: write
+permissions: {}
 
 concurrency:
   group: herdr-team-observability-observe
   cancel-in-progress: false
 
 jobs:
-  implement-and-review:
+  implement:
     runs-on: ubuntu-latest
     timeout-minutes: 360
-    env:
-      COPILOT_HOME: ${{ runner.temp }}/copilot-home
+    permissions:
+      contents: read
+      copilot-requests: write
+    outputs:
+      baseline_sha: ${{ steps.baseline.outputs.sha }}
+      head_sha: ${{ steps.package.outputs.sha }}
 
     steps:
       - name: Check out observe
@@ -43,11 +45,6 @@ jobs:
           test "$(git branch --show-current)" = "observe"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          ./install.sh \
-            --prefix "$RUNNER_TEMP/herdr-bin" \
-            --copilot-dir "$COPILOT_HOME"
-          test -r "$COPILOT_HOME/agents/pre-pr-reviewer.md"
-          test -r "$COPILOT_HOME/skills/pre-pr-review/SKILL.md"
           echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
       - name: Agent 1 - implement observability
@@ -84,7 +81,6 @@ jobs:
             --model gpt-5.6-sol \
             --effort max \
             --allow-all-tools \
-            --allow-all-paths \
             --disable-builtin-mcps \
             --no-ask-user
 
@@ -120,8 +116,94 @@ jobs:
           bash tests/run-all.sh
           test -z "$(git status --porcelain)"
 
+      - name: Package committed implementation
+        id: package
+        run: |
+          set -euo pipefail
+          git bundle create "$RUNNER_TEMP/observability.bundle" HEAD
+          git bundle verify "$RUNNER_TEMP/observability.bundle"
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Upload committed implementation
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: observability-implementation-${{ github.run_id }}
+          path: ${{ runner.temp }}/observability.bundle
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    needs: implement
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    outputs:
+      head_sha: ${{ steps.validate.outputs.sha }}
+
+    steps:
+      - name: Check out observe
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: observe
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Download committed implementation
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: observability-implementation-${{ github.run_id }}
+          path: ${{ runner.temp }}/implementation
+
+      - name: Validate publication
+        id: validate
+        env:
+          BASE_SHA: ${{ needs.implement.outputs.baseline_sha }}
+          EXPECTED_HEAD: ${{ needs.implement.outputs.head_sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$BASE_SHA"
+
+          bundle="$RUNNER_TEMP/implementation/observability.bundle"
+          git bundle verify "$bundle"
+          git fetch --no-tags "$bundle" HEAD:refs/remotes/agent/observability
+          implemented_sha="$(git rev-parse refs/remotes/agent/observability)"
+          test "$implemented_sha" = "$EXPECTED_HEAD"
+          git merge-base --is-ancestor "$BASE_SHA" "$implemented_sha"
+
+          mapfile -t commits < <(git rev-list --reverse "$BASE_SHA..$implemented_sha")
+          if (( ${#commits[@]} < 2 )); then
+            echo "::error::The implementation does not contain multiple outcome commits."
+            exit 1
+          fi
+
+          for commit in "${commits[@]}"; do
+            parent_count="$(
+              git rev-list --parents -n 1 "$commit" |
+                awk '{ print NF - 1 }'
+            )"
+            test "$parent_count" -eq 1
+            subject="$(git log -1 --format=%s "$commit")"
+            if [[ "$subject" == fixup\!* || "$subject" == squash\!* ]]; then
+              echo "::error::Non-atomic history marker found in $commit: $subject"
+              exit 1
+            fi
+          done
+
+          if git diff --name-only "$BASE_SHA..$implemented_sha" | grep -q '^\.github/'; then
+            echo "::error::Agent 1 may not add or change GitHub control-plane files."
+            exit 1
+          fi
+          if ! git diff --quiet "$BASE_SHA..$implemented_sha" -- \
+            agents/pre-pr-reviewer.md skills/pre-pr-review; then
+            echo "::error::Agent 1 may not change its independent reviewer or review skill."
+            exit 1
+          fi
+
+          git update-ref refs/heads/observability-result "$implemented_sha"
+          echo "sha=$implemented_sha" >> "$GITHUB_OUTPUT"
+
       - name: Push implementation to observe
-        id: push
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
@@ -132,15 +214,61 @@ jobs:
               tr -d '\n'
           )"
           echo "::add-mask::$auth"
-          git -c "http.extraHeader=AUTHORIZATION: basic $auth" \
-            push origin HEAD:refs/heads/observe
-          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          git \
+            -c core.hooksPath=/dev/null \
+            -c "http.extraHeader=AUTHORIZATION: basic $auth" \
+            push --no-verify \
+            "https://github.com/$GITHUB_REPOSITORY.git" \
+            refs/heads/observability-result:refs/heads/observe
+
+  review:
+    needs: [implement, publish]
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    permissions:
+      contents: read
+      copilot-requests: write
+
+    steps:
+      - name: Check out implemented commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.publish.outputs.head_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+
+      - name: Install Copilot CLI
+        run: |
+          npm install --global @github/copilot@1.0.80
+          copilot version
+
+      - name: Prepare trusted reviewer
+        env:
+          BASE_SHA: ${{ needs.implement.outputs.baseline_sha }}
+          HEAD_SHA: ${{ needs.publish.outputs.head_sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$HEAD_SHA"
+          copilot_home="$RUNNER_TEMP/copilot-home"
+          mkdir -p "$copilot_home/agents" "$copilot_home/skills"
+          git show "$BASE_SHA:agents/pre-pr-reviewer.md" \
+            > "$copilot_home/agents/pre-pr-reviewer.md"
+          git archive "$BASE_SHA" skills/pre-pr-review |
+            tar -x -C "$copilot_home"
+          test -r "$copilot_home/agents/pre-pr-reviewer.md"
+          test -r "$copilot_home/skills/pre-pr-review/SKILL.md"
+          echo "COPILOT_HOME=$copilot_home" >> "$GITHUB_ENV"
 
       - name: Agent 2 - adversarial pre-PR review
         id: review
         continue-on-error: true
         env:
-          BASE_SHA: ${{ steps.baseline.outputs.sha }}
+          BASE_SHA: ${{ needs.implement.outputs.baseline_sha }}
           COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN || github.token }}
         run: |
           set -euo pipefail
@@ -167,7 +295,6 @@ jobs:
             --model claude-opus-5 \
             --effort max \
             --allow-all-tools \
-            --allow-all-paths \
             --disable-builtin-mcps \
             --no-ask-user |
             tee "$RUNNER_TEMP/pre-pr-review.md"
@@ -175,8 +302,8 @@ jobs:
       - name: Publish review summary
         if: always()
         env:
-          BASE_SHA: ${{ steps.baseline.outputs.sha }}
-          HEAD_SHA: ${{ steps.push.outputs.sha }}
+          BASE_SHA: ${{ needs.implement.outputs.baseline_sha }}
+          HEAD_SHA: ${{ needs.publish.outputs.head_sha }}
         run: |
           {
             echo "## Observability implementation"
