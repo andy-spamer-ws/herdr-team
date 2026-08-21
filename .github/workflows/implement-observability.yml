@@ -1,0 +1,250 @@
+name: Implement and review observability
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  copilot-requests: write
+
+concurrency:
+  group: herdr-team-observability-observe
+  cancel-in-progress: false
+
+jobs:
+  implement-and-review:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    env:
+      COPILOT_HOME: ${{ runner.temp }}/copilot-home
+
+    steps:
+      - name: Check out observe
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: observe
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+
+      - name: Install Copilot CLI
+        run: |
+          npm install --global @github/copilot@1.0.80
+          copilot version
+
+      - name: Prepare agents and baseline
+        id: baseline
+        run: |
+          set -euo pipefail
+          test "$(git branch --show-current)" = "observe"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          ./install.sh \
+            --prefix "$RUNNER_TEMP/herdr-bin" \
+            --copilot-dir "$COPILOT_HOME"
+          test -r "$COPILOT_HOME/agents/pre-pr-reviewer.md"
+          test -r "$COPILOT_HOME/skills/pre-pr-review/SKILL.md"
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Agent 1 - implement observability
+        env:
+          BASE_SHA: ${{ steps.baseline.outputs.sha }}
+          COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN || github.token }}
+        run: |
+          set -euo pipefail
+          PROMPT="$(cat <<EOF
+          You are Agent 1, the implementation owner. Work only in the current checkout of
+          the observe branch, whose immutable baseline is ${BASE_SHA}.
+
+          Review docs/agent-traceability-design-assessment.md against the current repository,
+          then implement its observability design completely. Resolve its open decisions
+          conservatively, preferring the proposed options unless current code provides evidence
+          for a safer choice. Treat acceptance criteria A1-A11 and tests T1-T24 as the definition
+          of done. Preserve existing behaviour and add no non-stdlib runtime dependency.
+
+          Use atomic commits that each change and prove exactly one testable outcome:
+          - work in dependency order and keep unrelated files out of each commit;
+          - add or update the automated proof with the outcome, run the narrow proof, then commit;
+          - use a concise descriptive commit subject; never use fixup or squash commits;
+          - do not amend, rebase, squash, or otherwise rewrite existing history.
+
+          Stay on observe. Do not create, switch, or delete branches or worktrees. Do not push and
+          do not create a pull request; the workflow owns publication. Before finishing, run
+          bash tests/run-all.sh and leave a clean working tree with every implementation change
+          committed.
+          EOF
+          )"
+
+          copilot \
+            --prompt "$PROMPT" \
+            --model gpt-5.6-sol \
+            --effort max \
+            --allow-all-tools \
+            --allow-all-paths \
+            --disable-builtin-mcps \
+            --no-ask-user
+
+      - name: Verify implementation and commit discipline
+        env:
+          BASE_SHA: ${{ steps.baseline.outputs.sha }}
+        run: |
+          set -euo pipefail
+          test "$(git branch --show-current)" = "observe"
+          git merge-base --is-ancestor "$BASE_SHA" HEAD
+          test -z "$(git status --porcelain)"
+
+          mapfile -t commits < <(git rev-list --reverse "$BASE_SHA..HEAD")
+          if (( ${#commits[@]} < 2 )); then
+            echo "::error::The implementation must be split into multiple atomic outcome commits."
+            exit 1
+          fi
+
+          for commit in "${commits[@]}"; do
+            parent_count="$(
+              git rev-list --parents -n 1 "$commit" |
+                awk '{ print NF - 1 }'
+            )"
+            test "$parent_count" -eq 1
+            subject="$(git log -1 --format=%s "$commit")"
+            if [[ "$subject" == fixup\!* || "$subject" == squash\!* ]]; then
+              echo "::error::Non-atomic history marker found in $commit: $subject"
+              exit 1
+            fi
+          done
+
+          test -f tests/run-all.sh
+          bash tests/run-all.sh
+          test -z "$(git status --porcelain)"
+
+      - name: Push implementation to observe
+        id: push
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          auth="$(
+            printf 'x-access-token:%s' "$GITHUB_TOKEN" |
+              base64 |
+              tr -d '\n'
+          )"
+          echo "::add-mask::$auth"
+          git -c "http.extraHeader=AUTHORIZATION: basic $auth" \
+            push origin HEAD:refs/heads/observe
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Agent 2 - adversarial pre-PR review
+        id: review
+        continue-on-error: true
+        env:
+          BASE_SHA: ${{ steps.baseline.outputs.sha }}
+          COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN || github.token }}
+        run: |
+          set -euo pipefail
+          PROMPT="$(cat <<EOF
+          Review the implementation in ${BASE_SHA}..HEAD.
+
+          Original task: review docs/agent-traceability-design-assessment.md and implement its
+          observability design on the observe branch using atomic, testable outcome commits.
+
+          Definition of done: acceptance criteria A1-A11 and tests T1-T24 in
+          docs/agent-traceability-design-assessment.md, with bash tests/run-all.sh passing.
+
+          You are not given Agent 1's summary or session output. Do not seek either. Before writing
+          any finding, invoke the pre-pr-review skill as required by your agent profile. Review the
+          diff and surrounding code, run adversarial probes, fix nothing, and emit only the required
+          evidence-backed report with its exact final verdict line.
+          EOF
+          )"
+
+          copilot \
+            --prompt "$PROMPT" \
+            --silent \
+            --agent pre-pr-reviewer \
+            --model claude-opus-5 \
+            --effort max \
+            --allow-all-tools \
+            --allow-all-paths \
+            --disable-builtin-mcps \
+            --no-ask-user |
+            tee "$RUNNER_TEMP/pre-pr-review.md"
+
+      - name: Publish review summary
+        if: always()
+        env:
+          BASE_SHA: ${{ steps.baseline.outputs.sha }}
+          HEAD_SHA: ${{ steps.push.outputs.sha }}
+        run: |
+          {
+            echo "## Observability implementation"
+            echo
+            echo "- Branch: \`observe\`"
+            echo "- Baseline: \`${BASE_SHA:-unavailable}\`"
+            echo "- Implemented head: \`${HEAD_SHA:-unavailable}\`"
+            echo
+            echo "### Outcome commits"
+            if [[ -n "${BASE_SHA:-}" ]] && git cat-file -e "$BASE_SHA^{commit}" 2>/dev/null; then
+              git log --reverse --format='- `%h` %s' "$BASE_SHA..HEAD"
+            else
+              echo "- unavailable"
+            fi
+            echo
+            echo "## Adversarial pre-PR review"
+            echo
+            if [[ -f "$RUNNER_TEMP/pre-pr-review.md" ]]; then
+              cat "$RUNNER_TEMP/pre-pr-review.md"
+            else
+              echo "Reviewer produced no report."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Enforce review verdict
+        if: always()
+        env:
+          REVIEW_OUTCOME: ${{ steps.review.outcome }}
+        run: |
+          set -euo pipefail
+          if [[ "$REVIEW_OUTCOME" != "success" ]]; then
+            echo "::error::The pre-PR reviewer did not complete successfully."
+            exit 1
+          fi
+
+          test -z "$(git status --porcelain)"
+          report="$RUNNER_TEMP/pre-pr-review.md"
+          test -s "$report"
+
+          set +e
+          python3 - "$report" <<'PY'
+          import re
+          import sys
+          from pathlib import Path
+
+          text = Path(sys.argv[1]).read_text(encoding="utf-8")
+          tokens = re.findall(r"REVIEW: (?:CLEAR|BLOCKED)", text)
+          lines = text.splitlines()
+          if len(tokens) != 1 or not lines or lines[-1] not in {
+              "REVIEW: CLEAR",
+              "REVIEW: BLOCKED",
+          }:
+              sys.exit(3)
+          sys.exit(0 if lines[-1] == "REVIEW: CLEAR" else 2)
+          PY
+          verdict_status=$?
+          set -e
+
+          case "$verdict_status" in
+            0)
+              echo "Pre-PR review is clear."
+              ;;
+            2)
+              echo "::error::Pre-PR review blocked the change. See the job summary."
+              exit 1
+              ;;
+            *)
+              echo "::error::Reviewer output did not contain exactly one valid final verdict."
+              exit 1
+              ;;
+          esac
