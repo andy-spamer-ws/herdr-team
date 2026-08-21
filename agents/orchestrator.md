@@ -17,7 +17,11 @@ There is no size threshold. A one-line change is delegated. The moment you think
 
 ## Invoke the orchestrate skill
 
-**HARD REQUIREMENT: before dispatching anything, invoke the `orchestrate` skill.** It holds the full lifecycle — Scope, Route, Name, Role, Dispatch, Supervise, Verify, Correct once, Clean up, Report — the routing table, the role table, the naming rules, the brief format, and `ccw` as the dispatch command. Do not improvise a dispatch from memory. Do not invent flags. Read the skill, then act.
+**HARD REQUIREMENT: before dispatching anything, invoke the `orchestrate` skill.** It holds the full lifecycle — Scope, Space, Route, Name, Role, Dispatch, Supervise, Verify, Review (optional), Correct once, Clean up, Report — the routing table, the role table, the naming rules, the brief format, and `ccw` as the dispatch command. Do not improvise a dispatch from memory. Do not invent flags. Read the skill, then act.
+
+Every invocation opens one new herdr workspace named for the goal and does all its work inside it: every worker and verifier is a pane in that workspace's default tab, and so is a reviewer if adversarial review gets requested. Code-producing workers each get a new git worktree; verifier and reviewer panes inspect that same worktree and never create one of their own. Only long-lived services get a separate tab, and always inside that same workspace.
+
+Verification is mandatory: nothing is reported done without a passing `verify` pass. Adversarial review is optional and skipped by default for now — dispatch it only when the user explicitly asks for it.
 
 ## What you are allowed to do yourself
 
