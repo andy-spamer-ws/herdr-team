@@ -50,7 +50,7 @@ jobs:
       - name: Agent 1 - implement observability
         env:
           BASE_SHA: ${{ steps.baseline.outputs.sha }}
-          COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN || github.token }}
+          COPILOT_GITHUB_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           PROMPT="$(cat <<EOF
@@ -190,13 +190,18 @@ jobs:
             fi
           done
 
-          if git diff --name-only "$BASE_SHA..$implemented_sha" | grep -q '^\.github/'; then
+          if ! git diff --quiet "$BASE_SHA..$implemented_sha" -- .github; then
             echo "::error::Agent 1 may not add or change GitHub control-plane files."
             exit 1
           fi
           if ! git diff --quiet "$BASE_SHA..$implemented_sha" -- \
             agents/pre-pr-reviewer.md skills/pre-pr-review; then
             echo "::error::Agent 1 may not change its independent reviewer or review skill."
+            exit 1
+          fi
+          if ! git diff --quiet "$BASE_SHA..$implemented_sha" -- \
+            .agents .claude .copilot .mcp.json AGENTS.md CLAUDE.md; then
+            echo "::error::Agent 1 may not add project-level agent customization."
             exit 1
           fi
 
@@ -269,11 +274,17 @@ jobs:
         continue-on-error: true
         env:
           BASE_SHA: ${{ needs.implement.outputs.baseline_sha }}
-          COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN || github.token }}
+          COPILOT_GITHUB_TOKEN: ${{ github.token }}
+          REPOSITORY_ROOT: ${{ github.workspace }}
         run: |
           set -euo pipefail
           PROMPT="$(cat <<EOF
           Review the implementation in ${BASE_SHA}..HEAD.
+
+          The repository is at ${REPOSITORY_ROOT}. Your process starts from an isolated directory
+          so the implementation cannot shadow your trusted skill or install hooks. Treat
+          ${REPOSITORY_ROOT} as the repository root: use absolute paths or git -C for every read
+          and probe, while reporting repository-relative file references.
 
           Original task: review docs/agent-traceability-design-assessment.md and implement its
           observability design on the observe branch using atomic, testable outcome commits.
@@ -288,14 +299,18 @@ jobs:
           EOF
           )"
 
+          mkdir -p "$RUNNER_TEMP/reviewer-cwd"
+          cd "$RUNNER_TEMP/reviewer-cwd"
           copilot \
             --prompt "$PROMPT" \
             --silent \
             --agent pre-pr-reviewer \
             --model claude-opus-5 \
             --effort max \
+            --add-dir "$REPOSITORY_ROOT" \
             --allow-all-tools \
             --disable-builtin-mcps \
+            --no-custom-instructions \
             --no-ask-user |
             tee "$RUNNER_TEMP/pre-pr-review.md"
 
@@ -344,7 +359,7 @@ jobs:
           test -s "$report"
 
           set +e
-          python3 - "$report" <<'PY'
+          python3 -I - "$report" <<'PY'
           import re
           import sys
           from pathlib import Path
@@ -352,10 +367,57 @@ jobs:
           text = Path(sys.argv[1]).read_text(encoding="utf-8")
           tokens = re.findall(r"REVIEW: (?:CLEAR|BLOCKED)", text)
           lines = text.splitlines()
-          if len(tokens) != 1 or not lines or lines[-1] not in {
-              "REVIEW: CLEAR",
-              "REVIEW: BLOCKED",
-          }:
+          verdicts = {"REVIEW: CLEAR", "REVIEW: BLOCKED"}
+          if len(tokens) != 1 or not lines or lines[-1] not in verdicts:
+              sys.exit(3)
+
+          if not lines[0].startswith("REVIEW OF: ") or not lines[0][11:].strip():
+              sys.exit(3)
+
+          worked = next(
+              (line for line in lines if line.startswith("LINES WORKED:")),
+              "",
+          )
+          if not all(f"R{number}" in worked for number in range(1, 6)):
+              sys.exit(3)
+
+          blind_spots = next(
+              (
+                  line.partition(":")[2].strip()
+                  for line in lines
+                  if line.startswith("DoD BLIND SPOTS NAMED:")
+              ),
+              "",
+          )
+          if not blind_spots or blind_spots.startswith("<"):
+              sys.exit(3)
+
+          finding_pattern = re.compile(
+              r"^F(\d+)\s+(BLOCKER|SHOULD FIX|NOTE)\s+\S"
+          )
+          findings = [
+              (index, finding_pattern.match(line))
+              for index, line in enumerate(lines)
+              if finding_pattern.match(line)
+          ]
+          numbers = [int(match.group(1)) for _, match in findings]
+          if numbers != list(range(1, len(numbers) + 1)):
+              sys.exit(3)
+
+          for position, (start, _) in enumerate(findings):
+              end = (
+                  findings[position + 1][0]
+                  if position + 1 < len(findings)
+                  else len(lines) - 1
+              )
+              block = lines[start:end]
+              if not any(line.lstrip().startswith("Evidence:") for line in block):
+                  sys.exit(3)
+
+          severities = [match.group(2) for _, match in findings]
+          if lines[-1] == "REVIEW: BLOCKED" and "BLOCKER" not in severities:
+              sys.exit(3)
+          if lines[-1] == "REVIEW: CLEAR" and "BLOCKER" in severities:
               sys.exit(3)
           sys.exit(0 if lines[-1] == "REVIEW: CLEAR" else 2)
           PY
