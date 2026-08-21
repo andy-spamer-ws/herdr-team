@@ -27,21 +27,25 @@ and never creates layout of its own, and where herdr's own hierarchy is
 
 ### The five topology rules
 
-1. Every `/orchestrate` invocation opens exactly **one new herdr workspace**,
-   named for the goal, and does all its work inside it.
-2. Every task, subagent, verifier, reviewer and worker for that goal is a
-   **pane in that workspace's default tab**, renamed to describe the batch.
-3. Services may use **separate tabs**, but always inside the same workspace —
-   never a workspace or session of their own.
-4. All code-producing work runs against a **new git worktree**, never the
-   checkout the orchestrator itself is sitting in.
+1. Every `/orchestrate` invocation binds to the **orchestrator's current herdr
+   workspace and current tab** — it never opens a new workspace.
+2. Every task, subagent, verifier, reviewer and worker for that invocation is a
+   **pane in that same current tab**, alongside the orchestrator's own pane.
+3. Shell commands that need their own pane and long-lived services may use
+   **separate tabs**, but always inside the same current workspace — never a
+   workspace or session of their own.
+4. All code-producing work runs against an **isolated git worktree**, added
+   with plain `git worktree add` (never herdr's own `worktree create`, which opens
+   its own workspace), and never the checkout the orchestrator itself is
+   sitting in.
 5. Every service tab launched is reported into the **workspace's status bar**
    via `herdr workspace report-metadata`, so its tab name stays visible without
    you having to keep saying it.
 
 These are functional, not stylistic: they are how the user watching the herdr
 UI finds the whole batch — worker, verifier, reviewer, and any services — in
-one place, without hunting across tabs or workspaces.
+one place, right where they already are, without hunting across tabs or
+workspaces.
 
 ---
 
@@ -68,47 +72,47 @@ Read enough to write the brief: which files change, what done looks like, what
 constraint the worker cannot discover on their own. Nothing more. Reading
 past that point is you starting to do the work.
 
-## 2. Space — one workspace per invocation
+## 2. Space — resolve the current workspace and tab, do not create one
 
-Open the workspace before you dispatch anything else:
+There is nothing to open. Resolve the ids you are already sitting in and reuse
+them for the whole invocation:
 
 ```bash
-herdr workspace create --label <goal-slug> --cwd <repo-path> --no-focus
-# -> result.workspace.workspace_id
-#    result.tab.tab_id        (the default tab)
-#    result.root_pane.pane_id (its first pane)
-herdr tab rename <tab_id> "<meaningful batch name>"
+herdr pane get "$HERDR_PANE_ID"
+# -> result.pane.workspace_id  (the current workspace — reuse it for everything)
+#    result.pane.tab_id        (the current tab — every delivery pane goes here)
 ```
 
-That default tab, renamed, is where every task, subagent, verifier, reviewer
-and worker for this goal lives, each as its own pane. There is no paneless
-exception once the workspace exists — read-only research and review get a
-pane there too, at the `analyse` or `review` role.
+That current tab is where every task, subagent, verifier, reviewer and worker
+for this invocation lives, each as its own pane, alongside the orchestrator's
+own pane. There is no paneless exception — read-only research and review get a
+pane there too, at the `analyse` or `review` role. Renaming the tab is
+optional, and if you do it, rename the tab you are already in — never create a
+new one first: `herdr tab rename <tab_id> "<meaningful batch name>"`.
 
-Because `herdr tab create` and `herdr pane split --current` without an
-explicit target default to the **calling pane's own workspace**, `ccw`'s
-`--tab <ID>` form is the one to reach for from here on — it addresses the
-target tab directly, so it lands correctly regardless of which workspace the
-orchestrator's own pane happens to sit in. `ccw --new-tab` has no `--workspace`
-flag, so use it only when the orchestrator's own pane is already inside the
-goal workspace; otherwise create the service tab directly (see Dispatch,
-below).
+Because the orchestrator's own pane is always inside this workspace now,
+`ccw`'s `--tab <ID>` form (addressing the current tab id from above) and
+`ccw --new-tab` (for a service, see Dispatch below) both land correctly with
+no special-casing.
 
-Every code-producing worker gets a new git worktree, never the checkout the
-orchestrator itself is sitting in — including a lone, sequential writer.
-Services keep their own tab in this same workspace, prefixed `svc-`, and their
-tab name gets surfaced through `herdr workspace report-metadata` (see
-Dispatch). Close the workspace only once every pane in it is idle or done and
-the batch has been reported.
+Every code-producing worker gets an isolated git worktree, added with plain
+`git worktree add` (not herdr's own `worktree create`, which opens a workspace of its
+own) — never the checkout the orchestrator itself is sitting in, including a
+lone, sequential writer. Services keep their own tab in this same workspace,
+prefixed `svc-`, and their tab name gets surfaced through
+`herdr workspace report-metadata` (see Dispatch). Never close the current
+workspace or the current tab — the orchestrator's own pane lives there for the
+rest of the session.
 
 ## 3. Route — cheapest substrate that works
 
 | Situation | Substrate |
 |-----------|-----------|
-| Read-only research or review, once the goal workspace exists | Pane in this goal's default tab, `analyse` or `review` role. |
-| Single writer | Pane in this goal's default tab, on its own new worktree. |
-| Two or more concurrent writers | Same default tab, one pane and one new worktree each. |
-| Long-lived service | New tab in the **same** workspace, prefixed `svc-`. |
+| Read-only research or review | Pane in the current tab, `analyse` or `review` role. |
+| Single writer | Pane in the current tab, on its own isolated `git worktree add`. |
+| Two or more concurrent writers | Same current tab, one pane and one isolated worktree each. |
+| A shell command that needs its own long-running pane | Separate tab in the **same** current workspace. |
+| Long-lived service | New tab in the **same** current workspace, prefixed `svc-`. |
 | Acceptance criterion writable up front **and** repo is factory-stamped | `factory run <workflow>` |
 
 **The factory test is one question: can you write the acceptance criterion
@@ -121,12 +125,12 @@ Run `factory doctor`, the read-only readiness check, to verify whether a repo is
 
 Every work item carries a unique name.
 
-- **Workspace = the goal.** `issue-89-90`
-- **Default tab = the batch**, renamed to match — every delivery agent for
-  this goal is a pane in it.
+- **Current workspace and current tab already exist** — nothing here needs
+  naming or creating; renaming the current tab to describe the batch is
+  optional.
 - **Agent = the task.** `analyse-89`, `fix-90`
 - **Worktree label matches the agent name.**
-- **Service tab = `svc-<name>`**, still inside the goal workspace.
+- **Service tab = `svc-<name>`**, still inside the current workspace.
 
 herdr requires agent names to match `[a-z][a-z0-9_-]{0,31}` and be unique among
 live agents. `ccw` rejects anything else before it touches herdr.
@@ -190,54 +194,54 @@ communication addendum is installed once into the Copilot instructions file by
 `install.sh` and applies to every worker automatically.
 
 `ccw` needs `HERDR_PANE_ID` set unless you pass `--tab` or `--new-tab`, because
-the default placement splits the pane you are in — and that default placement
-never targets the goal workspace's default tab reliably, so **do not use
-`ccw` with no `--tab`/`--new-tab` for this skill's work.** Address every pane
-by the tab id from Space, above.
+the default placement splits the pane you are in. Address every delivery pane
+by the current tab id resolved in Space, above.
 
-### Every delivery agent — same workspace, same default tab
+### Every delivery agent — same current workspace, same current tab
 
-One worktree per code-producing agent, one pane per agent, all in the goal
-workspace's default tab:
+One isolated git worktree per code-producing agent, one pane per agent, all in
+the current tab:
 
 ```bash
-# single writer
-herdr worktree create --cwd /path/to/repo --branch fix/90 --label fix-90 --no-focus
-ccw fix-90 --role build --cwd /path/to/wt-90 --tab <default_tab_id> --split down --no-focus
+# single writer — plain git, not herdr's own worktree create (that opens a workspace)
+git -C /path/to/repo worktree add -b fix/90 /path/to/wt-90
+ccw fix-90 --role build --cwd /path/to/wt-90 --tab <current_tab_id> --split down --no-focus
 
 # a second, concurrent writer in the same batch
-herdr worktree create --cwd /path/to/repo --branch fix/89 --label analyse-89 --no-focus
-ccw analyse-89 --role analyse --cwd /path/to/wt-89 --tab <default_tab_id> --split down --no-focus
+git -C /path/to/repo worktree add -b analyse/89 /path/to/wt-89
+ccw analyse-89 --role analyse --cwd /path/to/wt-89 --tab <current_tab_id> --split down --no-focus
 
 # the verifier reads the same worktree the writer used — it does not get a
 # worktree of its own, and it is dispatched every time
-ccw verify-90 --role verify --cwd /path/to/wt-90 --tab <default_tab_id> --split down --no-focus
+ccw verify-90 --role verify --cwd /path/to/wt-90 --tab <current_tab_id> --split down --no-focus
 
 # the reviewer, same worktree, same rule — but only if review was requested
-ccw review-90 --role review --cwd /path/to/wt-90 --tab <default_tab_id> --split down --no-focus
+ccw review-90 --role review --cwd /path/to/wt-90 --tab <current_tab_id> --split down --no-focus
 ```
 
-### Services — their own tab, same workspace, reported to the status bar
-
-`ccw --new-tab` shells out to `herdr tab create` without a `--workspace`
-argument, so it lands in whatever workspace the orchestrator's own pane is
-currently in. If that happens to be the goal workspace, `ccw <svc-name>
---role mechanical --cwd <path> --new-tab <svc-name> --no-focus` is enough. If
-it is not, create the service tab explicitly against the goal workspace
-instead, then start copilot into its root pane the same way `ccw` would:
+When a worker's pane closes (see Clean up), remove its worktree so the repo
+does not accumulate stale checkouts:
 
 ```bash
-herdr tab create --workspace <goal_workspace_id> --label svc-api --cwd /path/to/repo --no-focus
-# -> result.tab.tab_id, result.root_pane.pane_id
-herdr agent start svc-api --kind copilot --pane <root_pane_id> --timeout 120000 \
-  -- --model gpt-5.6-luna --effort low --allow-all   # role flags from lib/roles.sh
+git -C /path/to/repo worktree remove /path/to/wt-90
+git -C /path/to/repo worktree prune
 ```
 
-Either way, once the service tab exists, report it into the workspace's status
-bar so its name stays visible without you re-stating it:
+### Services — their own tab, same current workspace, reported to the status bar
+
+Because the orchestrator's own pane is always inside the current workspace,
+`ccw <svc-name> --role mechanical --cwd <path> --new-tab <svc-name> --no-focus`
+always lands in the right place — no special-casing needed.
 
 ```bash
-herdr workspace report-metadata <goal_workspace_id> --source orchestrator \
+ccw svc-api --role mechanical --cwd /path/to/repo --new-tab svc-api --no-focus
+```
+
+Once the service tab exists, report it into the workspace's status bar so its
+name stays visible without you re-stating it:
+
+```bash
+herdr workspace report-metadata <current_workspace_id> --source orchestrator \
   --token svc-api=svc-api
 ```
 
@@ -310,19 +314,16 @@ order yourself. Workers never talk to each other; blockers come to you.
 ### Verified command reference (herdr 0.8.0)
 
 ```
-herdr workspace create --label <LABEL> --cwd <PATH> --no-focus
-                                                             -> result.workspace.workspace_id
-                                                                result.tab.tab_id
-                                                                result.root_pane.pane_id
+herdr pane get <PANE_ID>                                     -> result.pane.workspace_id
+                                                                result.pane.tab_id
 herdr tab rename <TAB_ID> <LABEL>
-herdr tab create --workspace <WORKSPACE_ID> --label <LABEL> --cwd <PATH> --no-focus
-                                                             -> result.tab.tab_id
-                                                                result.root_pane.pane_id
 herdr pane split --current --direction <right|down> --cwd <PATH> --no-focus
                                                              -> result.pane.pane_id
 herdr pane split --pane <PANE_ID> --direction <right|down> --cwd <PATH> --no-focus
                                                              -> result.pane.pane_id
-herdr worktree create --cwd <PATH> --branch <NAME> --label <LABEL> --no-focus
+git worktree add -b <BRANCH> <PATH>
+git worktree remove <PATH>
+git worktree prune
 herdr tab list                                               -> result.tabs[]
 herdr agent list                                             -> result.agents[]
 herdr agent start <name> --kind copilot --pane <pane-id> [--timeout MS] -- <copilot args>
@@ -336,7 +337,6 @@ herdr workspace get <WORKSPACE_ID>                           -> result.workspace
 herdr workspace report-metadata <WORKSPACE_ID> --source <ID> --token <NAME=VALUE>
 herdr pane list --workspace <workspace_id>                   -> result.panes[]
 herdr pane close <pane_id>
-herdr workspace close <workspace_id>
 ```
 
 Read sources: `visible`, `recent`, `recent-unwrapped` (prefer for transcripts),
@@ -376,12 +376,12 @@ pass that while being inert, bypassable, or applied to one instance of a
 problem that exists in forty places. Review asks the open question instead:
 **what is wrong with this that nobody thought to check?**
 
-Dispatch it as its own agent at the `review` role, in the same goal workspace's
-default tab as everyone else, reading the same worktree the writer used. It is
-not a subagent and it is not you reading the diff again.
+Dispatch it as its own agent at the `review` role, in the same current tab as
+everyone else, reading the same worktree the writer used. It is not a subagent
+and it is not you reading the diff again.
 
 ```bash
-ccw review-90 --role review --cwd /path/to/wt-90 --tab <default_tab_id> --split down --no-focus
+ccw review-90 --role review --cwd /path/to/wt-90 --tab <current_tab_id> --split down --no-focus
 ```
 
 **It receives the diff, the task and the DoD. It never receives the
@@ -422,32 +422,31 @@ herdr agent get <name>
 herdr pane close <pane_id>
 ```
 
-Closing every agent pane in a tab leaves the tab alive with one bare shell
-pane. Find and close that leftover too:
+Closing every delivery agent pane in the current tab leaves the orchestrator's
+own pane and, if you split any bare shells while working, those too. Find and
+close those leftovers:
 
 ```bash
 herdr pane list --workspace <workspace_id>
 herdr pane close <pane_id>
 ```
 
-`svc-` panes never auto-close, and neither does the workspace they live in
-alongside the delivery batch. Workers never daemonize — long-lived processes
+`svc-` panes never auto-close. Workers never daemonize — long-lived processes
 are started by you, in named `svc-` tabs, with a note recording what the
 service is pinned to (branch, commit, port, config), and cleared from the
 workspace's status bar with `--clear-token` when the service tab closes.
 
-Once every pane in the goal workspace is idle or done and the batch has been
-reported, close the workspace itself:
-
-```bash
-herdr workspace close <workspace_id>
-```
+Never close the current workspace or the current tab — the orchestrator's own
+pane lives there for the rest of the session. Once every delivery pane from
+this invocation is idle or done, its worktree removed (`git worktree remove`,
+then `git worktree prune`), and the batch has been reported, the invocation is
+finished; nothing further needs closing.
 
 ## 12. Report
 
-Tell the user what was delegated, under which workspace, tab and agent name,
-and what the verdict was. Names, not pane ids. Say plainly whether review ran
-or was skipped by default — do not imply it happened when it did not.
+Tell the user what was delegated, in which tab, under which agent names, and
+what the verdict was. Names, not pane ids. Say plainly whether review ran or
+was skipped by default — do not imply it happened when it did not.
 
 ---
 

@@ -19,14 +19,22 @@ There is no size threshold. A one-line change is delegated. The moment you think
 
 **HARD REQUIREMENT: before dispatching anything, invoke the `orchestrate` skill.** It holds the full lifecycle — Scope, Space, Route, Name, Role, Dispatch, Supervise, Verify, Review (optional), Correct once, Clean up, Report — the routing table, the role table, the naming rules, the brief format, and `ccw` as the dispatch command. Do not improvise a dispatch from memory. Do not invent flags. Read the skill, then act.
 
-Every invocation opens one new herdr workspace named for the goal and does all its work inside it: every worker and verifier is a pane in that workspace's default tab, and so is a reviewer if adversarial review gets requested. Code-producing workers each get a new git worktree; verifier and reviewer panes inspect that same worktree and never create one of their own. Only long-lived services get a separate tab, and always inside that same workspace.
+Every invocation stays in the orchestrator's current herdr workspace and current
+tab — it never opens a new workspace. Every worker, verifier, and reviewer (if
+adversarial review gets requested) is a pane in that same current tab,
+alongside the orchestrator's own pane. Code-producing workers each get an
+isolated git worktree, added with `git worktree add` — never herdr's own
+`worktree create`, which opens a workspace of its own; verifier and reviewer
+panes inspect that same worktree and never create one of their own. Only
+shell commands that need their own pane and long-lived services get a separate
+tab, and always inside that same current workspace.
 
 Verification is mandatory: nothing is reported done without a passing `verify` pass. Adversarial review is optional and skipped by default for now — dispatch it only when the user explicitly asks for it.
 
 ## What you are allowed to do yourself
 
 - `view`, `glob`, `grep` — to understand the codebase well enough to brief someone else.
-- `bash` — **read-only only**, and primarily for the `herdr` CLI and `ccw`.
+- `bash` — **read-only, plus one narrow exception: `git worktree add`/`remove`/`prune` to set up and tear down isolated worktrees for delivery agents.** Otherwise primarily for the `herdr` CLI and `ccw`.
 - `web_fetch` — research to inform a brief.
 - `task` — spawn subagents for read-only research or review when a herdr pane is overkill.
 - `skill` — load `orchestrate` and any other skill you need.
@@ -35,16 +43,19 @@ You have no `edit` and no `create` tool. That is deliberate, and it is not the w
 
 ### Bash is not a loophole
 
-You have `bash` so you can drive `herdr` and `ccw`. Because `bash` can write files by redirection, it is the one way you could break the rule without a tool telling you no. Do not. Specifically forbidden, no exceptions:
+You have `bash` so you can drive `herdr`, `ccw`, and worktree setup. Because `bash` can write files by redirection, it is the one way you could break the rule without a tool telling you no. Do not. Specifically forbidden, no exceptions:
 
 - Any redirection that creates or truncates a file (`>`, `>>`, `tee`)
 - Heredocs that write files (`cat > file <<EOF`)
 - In-place editors (`sed -i`, `perl -i`, `awk` writing back)
 - `mkdir`, `mv`, `cp`, `rm`, `touch`, `chmod` against project files
 - `git commit`, `git merge`, `git push`, `git checkout -b`, `git reset`
+- Any `git worktree` subcommand other than `add`, `remove`, or `prune` — and
+  even those three are for setting up or tearing down a delivery agent's
+  isolated checkout, never for touching files inside it
 - Package managers, build tools, test runners (`npm`, `pnpm`, `uv`, `pip`, `pytest`, `make`, `cargo`, `docker build`)
 
-Read-only commands are fine: `git status`, `git log`, `git diff`, `rg`, `fd`, `eza --tree`, `herdr *`, `ccw --dry-run`.
+Read-only commands are fine: `git status`, `git log`, `git diff`, `rg`, `fd`, `eza --tree`, `herdr *`, `ccw --dry-run`. So are `git worktree add -b <branch> <path>` (before dispatching a delivery agent into it), `git worktree remove <path>`, and `git worktree prune` (after that agent's pane closes) — nothing else about the worktree's contents.
 
 If a task needs any forbidden command, that is the signal to delegate, not the signal to make an exception.
 
