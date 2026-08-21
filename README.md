@@ -151,17 +151,28 @@ ccd
 That opens a herdr session, creates a tab named `orch-<dirname>`, and boots
 Copilot in it with the `orchestrator` agent at the orchestrator role.
 
-From there the orchestrator dispatches a worker. Check the argv first — it
-prints the exact commands and launches nothing:
+From there the orchestrator opens one herdr workspace for the goal, renames its
+default tab, and puts every worker for that goal in a pane there — on its own
+new git worktree, never the checkout the orchestrator itself is sitting in:
 
 ```bash
-ccw fix-90 --role build --cwd /path/to/repo --split right --no-focus --dry-run
+herdr workspace create --label fix-89-90 --cwd /path/to/repo --no-focus
+# -> result.workspace.workspace_id, result.tab.tab_id (default tab), result.root_pane.pane_id
+herdr tab rename <tab-id> fix-89-90
+
+herdr worktree create --cwd /path/to/repo --branch fix/90 --label fix-90 --no-focus
+```
+
+Check the argv first — it prints the exact commands and launches nothing:
+
+```bash
+ccw fix-90 --role build --cwd /path/to/wt-90 --tab <tab-id> --split down --no-focus --dry-run
 ```
 
 Then dispatch for real:
 
 ```bash
-ccw fix-90 --role build --cwd /path/to/repo --split right --no-focus
+ccw fix-90 --role build --cwd /path/to/wt-90 --tab <tab-id> --split down --no-focus
 # started fix-90  pane w8:p4  role build  model claude-sonnet-5
 ```
 
@@ -197,21 +208,33 @@ herdr agent get fix-90            # -> result.agent.pane_id, result.agent.agent_
 herdr pane close <pane_id>
 ```
 
-For two concurrent writers, give the batch its own tab and each writer its own
-worktree:
+For a second, concurrent writer in the same batch, give it its own worktree but
+the same workspace and the same default tab:
 
 ```bash
 herdr worktree create --cwd /path/to/repo --branch fix/89 --label analyse-89 --no-focus
-ccw analyse-89 --role analyse --cwd /path/to/wt-89 --new-tab issue-89-90 --no-focus
-ccw fix-90     --role build   --cwd /path/to/wt-90 --tab <tab-id> --split down --no-focus
+ccw analyse-89 --role analyse --cwd /path/to/wt-89 --tab <tab-id> --split down --no-focus
+```
+
+A long-lived service gets its own tab, prefixed `svc-`, but stays in the same
+workspace — and its tab name gets reported into the workspace's status bar so
+it stays visible:
+
+```bash
+ccw svc-api --role mechanical --cwd /path/to/repo --new-tab svc-api --no-focus
+herdr workspace report-metadata <workspace-id> --source orchestrator --token svc-api=svc-api
 ```
 
 `ccw` needs `HERDR_PANE_ID` set unless you pass `--tab` or `--new-tab`, because
-its default placement splits the pane you are in.
+its default placement splits the pane you are in — and `--new-tab` lands in
+whatever workspace that pane belongs to, so run it from a pane already inside
+the goal workspace.
 
-The full lifecycle — Scope, Route, Name, Role, Dispatch, Supervise, Verify,
-Review, Correct once, Clean up, Report — is in `skills/orchestrate/SKILL.md`, along with
-the routing table and the verified herdr 0.8.0 command reference.
+The full lifecycle — Scope, Space, Route, Name, Role, Dispatch, Supervise,
+Verify, Review (optional), Correct once, Clean up, Report — is in
+`skills/orchestrate/SKILL.md`, along with the routing table and the verified
+herdr 0.8.0 command reference. Verification is mandatory; adversarial review
+is off by default and only dispatched when explicitly requested.
 
 ## The doctor
 
