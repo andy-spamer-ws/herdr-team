@@ -1,15 +1,18 @@
 #!/usr/bin/env bash
 # install.sh — symlink the herdr-team bundle into your PATH and ~/.copilot.
 #
-# Creates seven symlinks, all pointing back into this bundle:
+# Creates three command symlinks pointing into this bundle. When the canonical
+# skill library exists, the four Copilot artefacts use two symlink hops:
 #
 #   <prefix>/ccd                   -> <bundle>/bin/ccd
 #   <prefix>/ccw                   -> <bundle>/bin/ccw
 #   <prefix>/orchestrate-doctor    -> <bundle>/bin/orchestrate-doctor
-#   <copilot-dir>/agents/orchestrator.md    -> <bundle>/agents/orchestrator.md
-#   <copilot-dir>/agents/pre-pr-reviewer.md -> <bundle>/agents/pre-pr-reviewer.md
-#   <copilot-dir>/skills/orchestrate    -> <bundle>/skills/orchestrate
-#   <copilot-dir>/skills/pre-pr-review  -> <bundle>/skills/pre-pr-review
+#   <copilot-dir>/agents/orchestrator.md
+#       -> <copilot-dir>/skill-library/agents/orchestrator.md
+#       -> <bundle>/agents/orchestrator.md
+#   <copilot-dir>/skills/orchestrate
+#       -> <copilot-dir>/skill-library/skills/orchestrate
+#       -> <bundle>/skills/orchestrate
 #
 # and writes one managed block:
 #
@@ -89,6 +92,12 @@ done
 [[ -n "$PREFIX" ]]      || { printf 'install.sh: --prefix needs a value\n' >&2; usage; }
 [[ -n "$COPILOT_DIR" ]] || { printf 'install.sh: --copilot-dir needs a value\n' >&2; usage; }
 
+case "$COPILOT_DIR" in
+  /*) ;;
+  *) COPILOT_DIR="$(pwd -P)/$COPILOT_DIR" ;;
+esac
+
+LIBRARY_DIR="$COPILOT_DIR/skill-library"
 LINKED=0
 ALREADY=0
 BLOCKED=0
@@ -119,7 +128,7 @@ ensure_dir() {
 }
 
 link_one() {
-  local src="$1" dst="$2" current
+  local src="$1" dst="$2" previous="${3:-}" current
 
   if [[ -L "$dst" ]]; then
     current="$(readlink "$dst")"
@@ -128,7 +137,7 @@ link_one() {
       ALREADY=$((ALREADY + 1))
       return 0
     fi
-    if [[ "$FORCE" != 1 ]]; then
+    if [[ "$FORCE" != 1 && "$current" != "$previous" ]]; then
       printf 'BLOCKED      %s is a symlink to %s — rerun with --force to replace it\n' "$dst" "$current"
       BLOCKED=$((BLOCKED + 1))
       return 1
@@ -167,6 +176,42 @@ link_one() {
   fi
   LINKED=$((LINKED + 1))
   return 0
+}
+
+can_link() {
+  local src="$1" dst="$2" previous="${3:-}" current
+  if [[ -L "$dst" ]]; then
+    current="$(readlink "$dst")"
+    if [[ "$current" == "$src" || "$current" == "$previous" || "$FORCE" == 1 ]]; then
+      return 0
+    fi
+    printf 'BLOCKED      %s is a symlink to %s — rerun with --force to replace it\n' "$dst" "$current"
+    BLOCKED=$((BLOCKED + 1))
+    return 1
+  fi
+  if [[ -e "$dst" ]]; then
+    printf 'BLOCKED      %s exists and is not a symlink — move it aside, then rerun\n' "$dst"
+    BLOCKED=$((BLOCKED + 1))
+    return 1
+  fi
+  return 0
+}
+
+preflight_library_links() {
+  local blocked=0
+  can_link "$BUNDLE_ROOT/agents/orchestrator.md" "$LIBRARY_DIR/agents/orchestrator.md" || blocked=1
+  can_link "$BUNDLE_ROOT/agents/pre-pr-reviewer.md" "$LIBRARY_DIR/agents/pre-pr-reviewer.md" || blocked=1
+  can_link "$BUNDLE_ROOT/skills/orchestrate" "$LIBRARY_DIR/skills/orchestrate" || blocked=1
+  can_link "$BUNDLE_ROOT/skills/pre-pr-review" "$LIBRARY_DIR/skills/pre-pr-review" || blocked=1
+  can_link "$LIBRARY_DIR/agents/orchestrator.md" "$COPILOT_DIR/agents/orchestrator.md" \
+    "$BUNDLE_ROOT/agents/orchestrator.md" || blocked=1
+  can_link "$LIBRARY_DIR/agents/pre-pr-reviewer.md" "$COPILOT_DIR/agents/pre-pr-reviewer.md" \
+    "$BUNDLE_ROOT/agents/pre-pr-reviewer.md" || blocked=1
+  can_link "$LIBRARY_DIR/skills/orchestrate" "$COPILOT_DIR/skills/orchestrate" \
+    "$BUNDLE_ROOT/skills/orchestrate" || blocked=1
+  can_link "$LIBRARY_DIR/skills/pre-pr-review" "$COPILOT_DIR/skills/pre-pr-review" \
+    "$BUNDLE_ROOT/skills/pre-pr-review" || blocked=1
+  return "$blocked"
 }
 
 install_addendum() {
@@ -213,6 +258,20 @@ install_addendum() {
   return 0
 }
 
+register_library() {
+  local output args
+  args=(register --library "$LIBRARY_DIR" --bundle "$BUNDLE_ROOT")
+  if [[ "$DRY_RUN" == 1 ]]; then
+    args+=(--dry-run)
+  fi
+  if ! output="$(python3 "$BUNDLE_ROOT/lib/library_registry.py" "${args[@]}" 2>&1)"; then
+    printf 'FAILED       update %s/library.json — %s\n' "$LIBRARY_DIR" "$output"
+    FAILED=$((FAILED + 1))
+    return 1
+  fi
+  printf '%s\n' "$output"
+}
+
 printf 'bundle       %s\n' "$BUNDLE_ROOT"
 printf 'prefix       %s\n' "$PREFIX"
 printf 'copilot dir  %s\n' "$COPILOT_DIR"
@@ -227,14 +286,40 @@ if ensure_dir "$PREFIX"; then
   link_one "$BUNDLE_ROOT/bin/orchestrate-doctor" "$PREFIX/orchestrate-doctor" || true
 fi
 
-if ensure_dir "$COPILOT_DIR/agents"; then
-  link_one "$BUNDLE_ROOT/agents/orchestrator.md" "$COPILOT_DIR/agents/orchestrator.md" || true
-  link_one "$BUNDLE_ROOT/agents/pre-pr-reviewer.md" "$COPILOT_DIR/agents/pre-pr-reviewer.md" || true
-fi
+if [[ -d "$LIBRARY_DIR" ]]; then
+  if [[ ! -f "$LIBRARY_DIR/library.json" ]]; then
+    printf 'FAILED       %s exists without a readable library.json — repair the skill library, then rerun\n' "$LIBRARY_DIR"
+    FAILED=$((FAILED + 1))
+  elif ensure_dir "$LIBRARY_DIR/agents" &&
+       ensure_dir "$LIBRARY_DIR/skills" &&
+       ensure_dir "$COPILOT_DIR/agents" &&
+       ensure_dir "$COPILOT_DIR/skills" &&
+       preflight_library_links &&
+       register_library; then
+    link_one "$BUNDLE_ROOT/agents/orchestrator.md" "$LIBRARY_DIR/agents/orchestrator.md" || true
+    link_one "$BUNDLE_ROOT/agents/pre-pr-reviewer.md" "$LIBRARY_DIR/agents/pre-pr-reviewer.md" || true
+    link_one "$BUNDLE_ROOT/skills/orchestrate" "$LIBRARY_DIR/skills/orchestrate" || true
+    link_one "$BUNDLE_ROOT/skills/pre-pr-review" "$LIBRARY_DIR/skills/pre-pr-review" || true
 
-if ensure_dir "$COPILOT_DIR/skills"; then
-  link_one "$BUNDLE_ROOT/skills/orchestrate" "$COPILOT_DIR/skills/orchestrate" || true
-  link_one "$BUNDLE_ROOT/skills/pre-pr-review" "$COPILOT_DIR/skills/pre-pr-review" || true
+    link_one "$LIBRARY_DIR/agents/orchestrator.md" "$COPILOT_DIR/agents/orchestrator.md" \
+      "$BUNDLE_ROOT/agents/orchestrator.md" || true
+    link_one "$LIBRARY_DIR/agents/pre-pr-reviewer.md" "$COPILOT_DIR/agents/pre-pr-reviewer.md" \
+      "$BUNDLE_ROOT/agents/pre-pr-reviewer.md" || true
+    link_one "$LIBRARY_DIR/skills/orchestrate" "$COPILOT_DIR/skills/orchestrate" \
+      "$BUNDLE_ROOT/skills/orchestrate" || true
+    link_one "$LIBRARY_DIR/skills/pre-pr-review" "$COPILOT_DIR/skills/pre-pr-review" \
+      "$BUNDLE_ROOT/skills/pre-pr-review" || true
+  fi
+else
+  printf 'WARN         %s not found — linking Copilot artefacts directly; install librarian to enable discovery\n' "$LIBRARY_DIR"
+  if ensure_dir "$COPILOT_DIR/agents"; then
+    link_one "$BUNDLE_ROOT/agents/orchestrator.md" "$COPILOT_DIR/agents/orchestrator.md" || true
+    link_one "$BUNDLE_ROOT/agents/pre-pr-reviewer.md" "$COPILOT_DIR/agents/pre-pr-reviewer.md" || true
+  fi
+  if ensure_dir "$COPILOT_DIR/skills"; then
+    link_one "$BUNDLE_ROOT/skills/orchestrate" "$COPILOT_DIR/skills/orchestrate" || true
+    link_one "$BUNDLE_ROOT/skills/pre-pr-review" "$COPILOT_DIR/skills/pre-pr-review" || true
+  fi
 fi
 
 if ensure_dir "$COPILOT_DIR"; then
