@@ -72,6 +72,56 @@ Read enough to write the brief: which files change, what done looks like, what
 constraint the worker cannot discover on their own. Nothing more. Reading
 past that point is you starting to do the work.
 
+### Collision check — before you dispatch, not after
+
+You are not the only writer. Other developers have open pull requests, and your
+own earlier batches have unmerged worktrees. A worker given a brief that
+overlaps in-flight work will produce a correct change that is wrong by the time
+it lands, and neither the worker nor the verifier can see it — they only see
+their own worktree.
+
+Enumerate the files the brief will touch, then ask who else is touching them:
+
+```bash
+# the files this brief will change, one per line (a variable, not a file:
+# the orchestrator writes no files, so no redirection or heredoc)
+scope='apps/bff/src/bff/ai/summary_cache.py
+apps/bff/src/bff/routes/ai.py'
+
+# open pull requests touching any of them (paginated: every PR, every file,
+# both sides of a rename; a failed request prints UNCHECKED, never silence)
+prs=$(gh api --paginate 'repos/{owner}/{repo}/pulls?state=open&per_page=100' --jq '.[].number') \
+  || echo "UNCHECKED open pull requests (listing failed)"
+for pr in $prs; do
+  files=$(gh api --paginate "repos/{owner}/{repo}/pulls/$pr/files?per_page=100" \
+            --jq '.[] | .filename, (.previous_filename // empty)') \
+    || { echo "UNCHECKED pr#$pr (file list failed)"; continue; }
+  printf '%s\n' "$files" | grep -qxFf <(printf '%s\n' "$scope") && echo "COLLISION pr#$pr"
+done
+
+# your own unmerged worktrees touching any of them, committed or not
+# (base is origin's default branch; in a fork, set it to the branch you land on)
+git worktree list --porcelain | sed -n 's/^worktree //p' | while read -r wt; do
+  base=$(git -C "$wt" symbolic-ref -q --short refs/remotes/origin/HEAD) \
+    && mb=$(git -C "$wt" merge-base HEAD "$base") \
+    || { echo "UNCHECKED worktree $wt (no default remote branch)"; continue; }
+  { git -C "$wt" diff --no-renames --name-only "$mb"
+    git -C "$wt" ls-files --others --exclude-standard; } \
+    | grep -qxFf <(printf '%s\n' "$scope") && echo "COLLISION worktree $wt"
+done
+```
+
+An `UNCHECKED` line is not a pass: treat it as a collision you could not rule
+out. A collision is a decision for the user, not something to route around. Say which
+PR or worktree overlaps and which file, then offer the three options: rebase the
+brief onto that branch, narrow the brief to the non-overlapping files, or wait
+for the merge. Do not dispatch a brief you know collides and leave the conflict
+for the reviewer — that converts a ten-second question into a rework cycle.
+
+Record the answer in the brief itself, so the worker inherits the constraint:
+"PR #147 moves this cache to S3 and will merge first; write against its
+interface, not the current one."
+
 ## 2. Space — resolve the current workspace and tab, do not create one
 
 There is nothing to open. Resolve the ids you are already sitting in and reuse
@@ -362,6 +412,39 @@ Dispatch it as its own agent at the `verify` role.
 Floor: you still read the changed files yourself whenever a protected path or
 an interface is touched.
 
+### The DoD carries the command, resolved
+
+A verifier that has to work out how to run the tests will guess, and on a repo
+reachable from several checkouts it will guess wrong — `.venv/bin/python` versus
+`.venv\Scripts\python.exe` versus `uv run`, from the repo root versus from a
+service subdirectory. A verifier running the wrong interpreter reports green
+against the wrong dependency set, which is worse than reporting nothing.
+
+Resolve it once, before dispatch, and paste the literal command into the DoD.
+The `repo-env` and `outcomes` skills are not part of this bundle. Use them when
+they are installed:
+
+```bash
+python3 ~/.copilot/skills/repo-env/repoenv.py show --repo <worktree>
+```
+
+Without them, read the command from the repository's own CI workflow or README,
+run it once in the worktree yourself through a `mechanical` worker, and paste
+the command that worked.
+
+Better, when the `outcomes` skill is installed, name it once in the repository
+and let both of you refer to the name:
+
+```bash
+python3 ~/.copilot/skills/outcomes/oc.py profile list    # resolved, per checkout
+```
+
+The DoD then reads "`python3 ~/.copilot/skills/outcomes/oc.py profile run tests`
+exits 0" rather than a command string
+that was correct on your machine. For anything a user is meant to see, require a
+`live:` profile as well — a green suite is silent on routing and registration,
+so it cannot be the whole DoD.
+
 **Verification is mandatory and is the default stopping point.** A passing
 `verify` pass is enough to report the work done and clean up — proceed
 straight to Clean up and Report unless adversarial review below is explicitly
@@ -468,3 +551,43 @@ You keep only:
 Everything else delegates and returns a verdict. Never dump the environment —
 it leaks tokens for nothing. Bound every pane read with `--lines`. When
 context runs hot, use the **handoff** skill rather than compacting mid-batch.
+
+### Context budget — the orchestrator is the thing that grows
+
+Workers are bounded: they finish and their context dies with them. You are the
+only participant that accumulates, and you accumulate for the whole batch. Left
+unbounded an orchestration session reaches thousands of turns, at which point
+almost every token spent is re-sending a transcript rather than doing work —
+input dwarfs output by two orders of magnitude and the cost is all re-reading.
+
+Treat it as a budget with a hard ceiling, not as something to notice when it
+hurts:
+
+| Signal | Action |
+| --- | --- |
+| A batch has finished and merged | Hand off now, even if you feel fine |
+| You are re-reading a file you already summarised | Hand off; the summary is gone, so the session is past useful |
+| ~40 dispatches, or the second compaction prompt | Hand off immediately |
+
+Handing off is cheap because your state is small and already written down. Emit
+it and start clean:
+
+```bash
+# the whole orchestrator state worth carrying
+python3 ~/.copilot/skills/outcomes/oc.py where    # the outcomes database: pin it with OC_DB in the new session
+python3 ~/.copilot/skills/outcomes/oc.py status   # outcomes and their evidence
+gh pr list --state merged --search "merged:>=<batch start date>" --limit 1000 \
+  --json number,title,mergedAt                    # what has landed this batch
+gh pr list --state open --limit 1000 --json number,title,headRefName
+```
+
+Dispatch a `mechanical` worker to write that plus the open decisions as a
+checkpoint with the **handoff** skill (loading a skill yourself does not
+delegate the write), then start a new session and read the checkpoint. Everything else in the transcript is recoverable from the
+repository, the outcomes database, or GitHub — which is precisely why carrying
+it is waste.
+
+Never compact mid-batch to buy room. Compaction silently drops the briefs and
+the collision constraints you agreed with the user, and the resulting session
+looks healthy while having forgotten why a worker was told to write against
+PR #147. Finish the batch, then hand off.
