@@ -101,8 +101,21 @@ fi
 
 argv+=("$@")
 
+rename_pane() {
+  local pane_id="$1" role="$2" out
+  if ! out=$(herdr pane rename "$pane_id" "$role" 2>&1); then
+    printf 'ccd: could not label pane %s as %s\n%s\n' "$pane_id" "$role" "$out" >&2
+    return 1
+  fi
+}
+
 # ------------------------------------------------------- already inside herdr
 if [[ "${HERDR_ENV:-}" == 1 ]]; then
+  [[ -n "${HERDR_PANE_ID:-}" ]] || {
+    printf 'ccd: HERDR_ENV is set but HERDR_PANE_ID is missing\n' >&2
+    exit 1
+  }
+  rename_pane "$HERDR_PANE_ID" orchestrator || exit 1
   exec "${argv[@]}"
 fi
 
@@ -168,6 +181,11 @@ except Exception:
     printf 'ccd: could not read root pane id from herdr tab create\n' >&2
     return 1
   }
+
+  if ! rename_pane "$pane_id" orchestrator; then
+    herdr pane close "$pane_id" >/dev/null 2>&1 || true
+    return 1
+  fi
 
   # argv[0] is `copilot`; herdr supplies the executable via --kind
   if ! herdr agent start "$pane_name" --kind copilot --pane "$pane_id" \

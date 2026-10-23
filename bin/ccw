@@ -14,6 +14,9 @@
 #   ccw issue-89 --role hard --cwd /path/to/repo --new-tab issue-89-90
 #   ccw probe --role mechanical --cwd . --dry-run
 #
+# Worker identity and display are separate: the agent name identifies the task,
+# while the pane label is the role so the herdr layout is readable at a glance.
+#
 # Roles — the model is the dial, effort is a deviation:
 #   mechanical  gpt-5.6-luna   --effort low
 #   build       claude-sonnet-5 --effort medium
@@ -159,6 +162,7 @@ if [[ "$DRY_RUN" == 1 ]]; then
       "${SPLIT:-right}" "$CWD" "$FOCUS"
     printf '# then, with PANE_ID from .result.pane.pane_id:\n'
   fi
+  printf 'herdr pane rename "$PANE_ID" %q\n' "$ROLE"
   printf 'herdr agent start %q --kind copilot --pane "$PANE_ID" --timeout %q --' "$NAME" "$START_TIMEOUT"
   for a in "${copilot_argv[@]}"; do printf ' %q' "$a"; done
   printf '\n'
@@ -243,11 +247,17 @@ else
   fi
 fi
 
-# ------------------------------------------------------------- start copilot
+# -------------------------------------------------------- label + start copilot
 # Leaving a bare shell pane behind on failure is worse than no pane at all.
 cleanup_pane() {
   herdr pane close "$PANE_ID" >/dev/null 2>&1 || true
 }
+
+if ! output=$(herdr pane rename "$PANE_ID" "$ROLE" 2>&1); then
+  printf 'ccw: could not label pane %s as %s\n%s\n' "$PANE_ID" "$ROLE" "$output" >&2
+  cleanup_pane
+  exit 1
+fi
 
 start=(herdr agent start "$NAME" --kind copilot --pane "$PANE_ID"
        --timeout "$START_TIMEOUT" -- "${copilot_argv[@]}")

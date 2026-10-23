@@ -149,7 +149,8 @@ ccd
 ```
 
 That opens a herdr session, creates a tab named `orch-<dirname>`, and boots
-Copilot in it with the `orchestrator` agent at the orchestrator role.
+Copilot in it with the `orchestrator` agent at the orchestrator role. The pane
+itself is labelled `orchestrator`.
 
 From there the orchestrator stays in that same workspace and tab — it never
 opens a new one — and puts every worker for the current goal in a pane there,
@@ -175,6 +176,11 @@ Then dispatch for real:
 ccw fix-90 --role build --cwd /path/to/wt-90 --tab <tab-id> --split down --no-focus
 # started fix-90  pane w8:p4  role build  model claude-sonnet-5
 ```
+
+Herdr keeps two names deliberately: `fix-90` is the task-specific agent name
+used by `herdr agent ...` commands, while the visible pane label is `build`.
+Every worker pane is labelled with its role (`analyse`, `build`, `verify`,
+`review`, and so on), so the layout does not show a wall of `copilot` panes.
 
 Send the brief. One command does the text and the Enter, atomically:
 

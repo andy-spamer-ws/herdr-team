@@ -129,6 +129,7 @@ Every work item carries a unique name.
   naming or creating; renaming the current tab to describe the batch is
   optional.
 - **Agent = the task.** `analyse-89`, `fix-90`
+- **Pane label = the role.** `analyse`, `build`, `verify`, `review`
 - **Worktree label matches the agent name.**
 - **Service tab = `svc-<name>`**, still inside the current workspace.
 
@@ -171,7 +172,7 @@ ccw <name> --role <mechanical|build|verify|review|analyse|hard|orchestrator> --c
 exits non-zero with usage. `--tier` is accepted as an alias for `--role`.
 Workers always get `--allow-all`.
 
-What it runs, in two steps, because herdr 0.8.0 `agent start` cannot create a
+What it runs, in three steps, because herdr 0.8.0 `agent start` cannot create a
 pane:
 
 ```bash
@@ -180,13 +181,17 @@ herdr pane split --current --direction right --cwd <path> --no-focus   # default
 herdr pane split --pane <first pane of TAB> --direction down --cwd <path> --no-focus  # --tab
 herdr tab create --label LABEL --cwd <path> --no-focus                 # --new-tab
 
-# 2. put copilot in it
+# 2. label the pane by role
+herdr pane rename <pane-id> <role>
+
+# 3. put copilot in it under its task-specific agent name
 herdr agent start <name> --kind copilot --pane <pane-id> --timeout 120000 \
   -- --model <model> --effort <level> [--context long_context] --allow-all
 ```
 
 If `agent start` fails, `ccw` closes the pane it created rather than leaving a
-bare shell behind. `--dry-run` prints both steps and exits 0 without launching —
+bare shell behind. A pane-label failure does the same. `--dry-run` prints all
+three steps and exits 0 without launching —
 use it whenever you are unsure what a flag will do.
 
 There is **no addendum flag**. Copilot has no `--append-system-prompt`; the SR
@@ -321,6 +326,7 @@ herdr pane split --current --direction <right|down> --cwd <PATH> --no-focus
                                                              -> result.pane.pane_id
 herdr pane split --pane <PANE_ID> --direction <right|down> --cwd <PATH> --no-focus
                                                              -> result.pane.pane_id
+herdr pane rename <PANE_ID> <ROLE>
 git worktree add -b <BRANCH> <PATH>
 git worktree remove <PATH>
 git worktree prune
