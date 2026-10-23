@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # install.sh — symlink the herdr-team bundle into your PATH and ~/.copilot.
 #
-# Creates seven symlinks, all pointing back into this bundle:
+# Creates eight symlinks, all pointing back into this bundle:
 #
 #   <prefix>/ccd                   -> <bundle>/bin/ccd
 #   <prefix>/ccw                   -> <bundle>/bin/ccw
 #   <prefix>/orchestrate-doctor    -> <bundle>/bin/orchestrate-doctor
+#   <prefix>/outcomes-pane         -> <bundle>/bin/outcomes-pane
 #   <copilot-dir>/agents/orchestrator.md    -> <bundle>/agents/orchestrator.md
 #   <copilot-dir>/agents/pre-pr-reviewer.md -> <bundle>/agents/pre-pr-reviewer.md
 #   <copilot-dir>/skills/orchestrate    -> <bundle>/skills/orchestrate
@@ -22,7 +23,7 @@
 #
 # usage: ./install.sh [--prefix DIR] [--copilot-dir DIR] [--force] [--dry-run]
 #
-#   --prefix DIR       where ccd/ccw/orchestrate-doctor go   (default: $HOME/bin)
+#   --prefix DIR       where ccd/ccw/orchestrate-doctor/outcomes-pane go (default: $HOME/bin)
 #   --copilot-dir DIR  your Copilot CLI config dir           (default: $HOME/.copilot)
 #   --force            replace symlinks that point elsewhere
 #   --dry-run          print every action, change nothing
@@ -67,7 +68,7 @@ usage() {
   cat >&2 <<'EOF'
 usage: ./install.sh [--prefix DIR] [--copilot-dir DIR] [--force] [--dry-run]
 
-  --prefix DIR       where ccd/ccw/orchestrate-doctor go   (default: $HOME/bin)
+  --prefix DIR       where ccd/ccw/orchestrate-doctor/outcomes-pane go (default: $HOME/bin)
   --copilot-dir DIR  your Copilot CLI config dir           (default: $HOME/.copilot)
   --force            replace symlinks that point elsewhere
   --dry-run          print every action, change nothing
@@ -225,6 +226,7 @@ if ensure_dir "$PREFIX"; then
   link_one "$BUNDLE_ROOT/bin/ccd"                "$PREFIX/ccd"                || true
   link_one "$BUNDLE_ROOT/bin/ccw"                "$PREFIX/ccw"                || true
   link_one "$BUNDLE_ROOT/bin/orchestrate-doctor" "$PREFIX/orchestrate-doctor" || true
+  link_one "$BUNDLE_ROOT/bin/outcomes-pane"      "$PREFIX/outcomes-pane"      || true
 fi
 
 if ensure_dir "$COPILOT_DIR/agents"; then

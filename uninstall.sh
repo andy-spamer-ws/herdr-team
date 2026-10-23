@@ -7,7 +7,7 @@
 #
 # usage: ./uninstall.sh [--prefix DIR] [--copilot-dir DIR] [--dry-run]
 #
-#   --prefix DIR       where ccd/ccw/orchestrate-doctor were linked (default: $HOME/bin)
+#   --prefix DIR       where ccd/ccw/orchestrate-doctor/outcomes-pane were linked (default: $HOME/bin)
 #   --copilot-dir DIR  your Copilot CLI config dir                  (default: $HOME/.copilot)
 #   --dry-run          print every action, change nothing
 #
@@ -73,7 +73,7 @@ usage() {
   cat >&2 <<'EOF'
 usage: ./uninstall.sh [--prefix DIR] [--copilot-dir DIR] [--dry-run]
 
-  --prefix DIR       where ccd/ccw/orchestrate-doctor were linked (default: $HOME/bin)
+  --prefix DIR       where ccd/ccw/orchestrate-doctor/outcomes-pane were linked (default: $HOME/bin)
   --copilot-dir DIR  your Copilot CLI config dir                  (default: $HOME/.copilot)
   --dry-run          print every action, change nothing
 EOF
@@ -197,6 +197,7 @@ printf '\n'
 unlink_one "$PREFIX/ccd"
 unlink_one "$PREFIX/ccw"
 unlink_one "$PREFIX/orchestrate-doctor"
+unlink_one "$PREFIX/outcomes-pane"
 unlink_one "$COPILOT_DIR/agents/orchestrator.md"
 unlink_one "$COPILOT_DIR/agents/pre-pr-reviewer.md"
 unlink_one "$COPILOT_DIR/skills/orchestrate"

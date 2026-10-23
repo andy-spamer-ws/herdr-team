@@ -1,9 +1,10 @@
 ---
 name: orchestrate
 description: >
-  Run delivery work as an orchestrator: scope it, route it to the cheapest
-  substrate that works, name it, pick a role, dispatch it with `ccw` into a
-  named herdr pane, supervise it, verify it against the DoD, correct it once,
+  Run delivery work as an orchestrator: scope it, declare it as verifiable
+  outcomes, route it to the cheapest substrate that works, name it, pick a
+  role, dispatch it with `ccw` into a named herdr pane behind a mandatory
+  outcomes pane, supervise it, verify it against the DoD, correct it once,
   clean up, report. Use when you are holding a unit of delivery work that
   someone else should execute — a fix, a feature, a batch of issues, a
   migration, a diagnosis — and you need to decide subagent vs pane vs tab vs
@@ -17,35 +18,40 @@ author: Andy Spamer
 You decide what the work is, who does it, and whether it came back good. You
 do not do it.
 
-The lifecycle, in order: **Scope → Space → Route → Name → Role → Dispatch →
-Supervise → Verify → Review (optional) → Correct once → Clean up → Report.**
+The lifecycle, in order: **Scope → Outcomes → Space → Route → Name → Role →
+Dispatch → Supervise → Verify → Review (optional) → Correct once → Clean up →
+Report.**
 
 Workers are GitHub Copilot CLI sessions in herdr panes. This skill is written
 against **herdr 0.8.0**, where `herdr agent start` takes `--kind` and `--pane`
 and never creates layout of its own, and where herdr's own hierarchy is
 **session → workspace → tab → pane**.
 
-### The five topology rules
+### The six topology rules
 
 1. Every `/orchestrate` invocation binds to the **orchestrator's current herdr
    workspace and current tab** — it never opens a new workspace.
 2. Every task, subagent, verifier, reviewer and worker for that invocation is a
    **pane in that same current tab**, alongside the orchestrator's own pane.
-3. Shell commands that need their own pane and long-lived services may use
+3. Every invocation carries exactly **one outcomes pane** in that same current
+   tab, opened before any delivery agent, pinned to this goal's `$OC_DB` — see
+   Outcomes, below. It is a plain pane running `outcomes-pane`, never an
+   agent.
+4. Shell commands that need their own pane and long-lived services may use
    **separate tabs**, but always inside the same current workspace — never a
    workspace or session of their own.
-4. All code-producing work runs against an **isolated git worktree**, added
+5. All code-producing work runs against an **isolated git worktree**, added
    with plain `git worktree add` (never herdr's own `worktree create`, which opens
    its own workspace), and never the checkout the orchestrator itself is
    sitting in.
-5. Every service tab launched is reported into the **workspace's status bar**
+6. Every service tab launched is reported into the **workspace's status bar**
    via `herdr workspace report-metadata`, so its tab name stays visible without
    you having to keep saying it.
 
 These are functional, not stylistic: they are how the user watching the herdr
-UI finds the whole batch — worker, verifier, reviewer, and any services — in
-one place, right where they already are, without hunting across tabs or
-workspaces.
+UI finds the whole batch — worker, verifier, reviewer, the outcomes pane, and
+any services — in one place, right where they already are, without hunting
+across tabs or workspaces.
 
 ---
 
@@ -122,7 +128,42 @@ Record the answer in the brief itself, so the worker inherits the constraint:
 "PR #147 moves this cache to S3 and will merge first; write against its
 interface, not the current one."
 
-## 2. Space — resolve the current workspace and tab, do not create one
+## 2. Outcomes — declare before you dispatch anything
+
+Before the first pane opens, turn DONE WHEN into outcomes the `outcomes`
+skill can verify by running a command, never by an agent's word:
+
+```bash
+# one fresh database per invocation, beside the orchestrator's session database,
+# so the pane and the final gate hold only this run's outcomes
+OC_DB="$(dirname "$(python3 ~/.copilot/skills/outcomes/oc.py where)")/outcomes-fix-90-$(date +%Y%m%dT%H%M%S).db"
+export OC_DB
+python3 ~/.copilot/skills/outcomes/oc.py add fix-90 "Fix 90" \
+  --verify "cd /path/to/wt-90 && ./run-tests.sh"
+```
+
+Every `oc.py` command in this skill uses the default install path. If the
+outcomes skill lives elsewhere (the `OC_PY` that `orchestrate-doctor` and
+`outcomes-pane` honour), substitute `python3 "$OC_PY"` throughout.
+
+Declaring and checking outcomes (`oc.py add`, `check`, `gate`, `where`,
+`status`) is bookkeeping in the orchestrator's own session directory, not
+delivery work — it is allowed under the bash restrictions the same way
+managing your own todos is.
+
+Keep `$OC_DB`. It is what the outcomes pane in Space, below, pins to; what
+every `oc check` and the final `oc gate` for this goal target; and what you
+report as the DoD ledger in Report. Declare outcomes in the orchestrator's own
+session, never a worker's — the orchestrator's session outlives every delivery
+pane, including the workers themselves. Never reuse a previous run's database,
+even for a retry of the same goal: its verifiers point at worktrees that Clean
+up has already removed, so its rows would fail this run's gate.
+
+Re-run `oc check` (or `oc check <id>`) whenever a worker or verifier reports
+progress, so the outcomes pane reflects reality within the batch, not just at
+the end.
+
+## 3. Space — resolve the current workspace and tab, do not create one
 
 There is nothing to open. Resolve the ids you are already sitting in and reuse
 them for the whole invocation:
@@ -140,6 +181,21 @@ pane there too, at the `analyse` or `review` role. Renaming the tab is
 optional, and if you do it, rename the tab you are already in — never create a
 new one first: `herdr tab rename <tab_id> "<meaningful batch name>"`.
 
+**Before any delivery agent goes into that tab, open the one outcomes pane —**
+a plain pane, never an agent, pinned to the `$OC_DB` from Outcomes above:
+
+```bash
+herdr pane split --pane "$HERDR_PANE_ID" --direction down --cwd <repo-path> --no-focus
+# -> result.pane.pane_id
+herdr pane rename <pane_id> outcomes
+herdr pane run <pane_id> outcomes-pane --db "$OC_DB"
+```
+
+That is the whole contract: one outcomes pane, in the current tab, before the
+first `ccw`. It never receives a `ccw` dispatch and never becomes an `agent` in
+herdr's sense — `herdr agent get`/`agent list` will not show it, and
+supervision below does not wait on it. It is a status board, not a worker.
+
 Because the orchestrator's own pane is always inside this workspace now,
 `ccw`'s `--tab <ID>` form (addressing the current tab id from above) and
 `ccw --new-tab` (for a service, see Dispatch below) both land correctly with
@@ -154,7 +210,7 @@ prefixed `svc-`, and their tab name gets surfaced through
 workspace or the current tab — the orchestrator's own pane lives there for the
 rest of the session.
 
-## 3. Route — cheapest substrate that works
+## 4. Route — cheapest substrate that works
 
 | Situation | Substrate |
 |-----------|-----------|
@@ -171,7 +227,7 @@ named copilot pane.
 
 Run `factory doctor`, the read-only readiness check, to verify whether a repo is factory-stamped.
 
-## 4. Name
+## 5. Name
 
 Every work item carries a unique name.
 
@@ -189,7 +245,7 @@ live agents. `ccw` rejects anything else before it touches herdr.
 Pane ids (`w16:p4`) are an implementation detail. Never use one when talking to
 the user — use the agent name. Agent commands accept either.
 
-## 5. Role — the model is the dial, effort is a deviation
+## 6. Role — the model is the dial, effort is a deviation
 
 | Role | Model `ccw` applies | Use for |
 |------|---------------------|---------|
@@ -210,7 +266,7 @@ pattern lose money.
 The mapping lives in `lib/roles.sh` in the bundle. Do not pass `--model`
 yourself; change the role.
 
-## 6. Dispatch — `ccw` is THE command
+## 7. Dispatch — `ccw` is THE command
 
 ```
 ccw <name> --role <mechanical|build|verify|review|analyse|hard|orchestrator> --cwd <path> \
@@ -274,8 +330,9 @@ ccw verify-90 --role verify --cwd /path/to/wt-90 --tab <current_tab_id> --split 
 ccw review-90 --role review --cwd /path/to/wt-90 --tab <current_tab_id> --split down --no-focus
 ```
 
-When a worker's pane closes (see Clean up), remove its worktree so the repo
-does not accumulate stale checkouts:
+When a worker's pane closes (see Clean up), and only after the final `oc gate`
+has run (its verifiers `cd` into these worktrees), remove its worktree so the
+repo does not accumulate stale checkouts:
 
 ```bash
 git -C /path/to/repo worktree remove /path/to/wt-90
@@ -340,7 +397,7 @@ DO NOT:
 - <out of scope things you predict they will drift into>
 ```
 
-## 7. Supervise
+## 8. Supervise
 
 Never send input to a pane whose `agent_status` is `working` or `blocked`.
 Block properly instead.
@@ -376,7 +433,8 @@ herdr pane split --current --direction <right|down> --cwd <PATH> --no-focus
                                                              -> result.pane.pane_id
 herdr pane split --pane <PANE_ID> --direction <right|down> --cwd <PATH> --no-focus
                                                              -> result.pane.pane_id
-herdr pane rename <PANE_ID> <ROLE>
+herdr pane rename <PANE_ID> <ROLE|outcomes>
+herdr pane run <PANE_ID> <COMMAND...>                        (the outcomes pane; not agent start)
 git worktree add -b <BRANCH> <PATH>
 git worktree remove <PATH>
 git worktree prune
@@ -401,7 +459,7 @@ never reach herdr's scrollback and a bigger `--lines` will not recover them. If
 a response will not fit, ask the worker to write it to a file and reply with the
 path, then read the file.
 
-## 8. Verify
+## 9. Verify
 
 **A verifier session receives the DoD verbatim and never sees the worker's
 report.** That is the point — a verifier that has read the worker's summary is
@@ -411,6 +469,16 @@ Dispatch it as its own agent at the `verify` role.
 
 Floor: you still read the changed files yourself whenever a protected path or
 an interface is touched.
+
+After the verifier reports, re-derive the outcomes you declared in Outcomes:
+
+```bash
+OC_DB="$OC_DB" python3 ~/.copilot/skills/outcomes/oc.py check
+```
+
+The outcomes pane picks up the new status on its next refresh automatically —
+you do not restart it. This is the mandatory `oc check` update: a verify pass
+that never re-derives the outcomes leaves the pane showing stale status.
 
 ### The DoD carries the command, resolved
 
@@ -450,7 +518,7 @@ so it cannot be the whole DoD.
 straight to Clean up and Report unless adversarial review below is explicitly
 in scope.
 
-## 9. Review (optional) — before the PR, not required
+## 10. Review (optional) — before the PR, not required
 
 **Review is off by default for now.** Only dispatch it when the user
 explicitly asks for a review, or explicitly asks the change be prepared as a
@@ -491,14 +559,18 @@ quoted example or discussion earlier would be misread as the verdict:
 When review was run, its findings feed the existing single correction pass
 below. They do not buy a second one.
 
-## 10. Correct once
+## 11. Correct once
 
 One correction, sent to the **same** agent with another `agent prompt`,
 whether the finding came from a failed `verify` or, if run, a `review` verdict
 of `BLOCKED`. If it misses again, escalate to the user. Twice missed means the
 brief was wrong, not the worker.
 
-## 11. Clean up
+## 12. Clean up
+
+**Gate first.** Run the final `oc gate` from Report, and keep its exit code,
+before you remove any worktree: the declared verifiers `cd` into those
+worktrees, so a gate run after removal fails on a missing path.
 
 A pane is closable when `herdr agent get <name>` reports `agent_status`
 `idle` or `done`. Do not call `pane process-info` on a copilot worker pane — the
@@ -520,6 +592,16 @@ herdr pane list --workspace <workspace_id>
 herdr pane close <pane_id>
 ```
 
+The outcomes pane is not an agent — `herdr agent get`/`agent list` never sees
+it, so it does not show up in the loop above. Find it by the name you gave it
+with `herdr pane rename` and close it the same way, but only once the batch's
+final `oc gate` has run and been reported:
+
+```bash
+herdr pane list --workspace <workspace_id>   # find the pane named `outcomes`
+herdr pane close <pane_id>
+```
+
 `svc-` panes never auto-close. Workers never daemonize — long-lived processes
 are started by you, in named `svc-` tabs, with a note recording what the
 service is pinned to (branch, commit, port, config), and cleared from the
@@ -527,15 +609,28 @@ workspace's status bar with `--clear-token` when the service tab closes.
 
 Never close the current workspace or the current tab — the orchestrator's own
 pane lives there for the rest of the session. Once every delivery pane from
-this invocation is idle or done, its worktree removed (`git worktree remove`,
-then `git worktree prune`), and the batch has been reported, the invocation is
-finished; nothing further needs closing.
+this invocation is idle or done, the outcomes pane is closed, their worktrees
+removed (`git worktree remove`, then `git worktree prune`), and the batch has
+been reported, the invocation is finished; nothing further needs closing.
 
-## 12. Report
+## 13. Report
 
 Tell the user what was delegated, in which tab, under which agent names, and
 what the verdict was. Names, not pane ids. Say plainly whether review ran or
 was skipped by default — do not imply it happened when it did not.
+
+Before calling anything done, report the batch's definition-of-done gate
+against the outcomes declared in Outcomes — the one you ran at the start of
+Clean up, before any worktree was removed — and its exit code verbatim, never
+a paraphrase of what you expect it to say:
+
+```bash
+OC_DB="$OC_DB" python3 ~/.copilot/skills/outcomes/oc.py gate
+```
+
+Exit `0` is `GATE GREEN` — report it as done. Any non-zero exit, including the
+`GATE EMPTY` case (no verifiable outcomes were ever declared), means it is not
+done; report the failing outcome ids and their evidence, not a summary.
 
 ---
 
