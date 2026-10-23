@@ -1087,3 +1087,14 @@ No CI, no runner. `tests/run-all.sh` lands in S3.
 - A11-7 `install.sh --dry-run` lists the `ccevent` symlink; the "seven symlinks" comment (`install.sh:4`) is corrected.
 - A11-8 `.gitignore` prevents any spool or db file from being committed.
 - A11-9 T1-T24 pass via `bash tests/run-all.sh`.
+
+### Open review findings to resolve before an implementation brief
+
+A design review on 2026-10-23 raised these gaps. They are not resolved in this assessment. An implementation brief must settle each one first.
+
+- **R-1 Fallback batch id.** The `tab-<tab_id>` fallback (D4) is unavailable for `dispatch_start`, which `ccw` emits before it acquires a tab. Reusing it across invocations also collides natural idempotency keys such as `<agent>:dispatch_start`. Mint and export a fresh fallback id before the first emit.
+- **R-2 Cursor stability.** `events` has no `INTEGER PRIMARY KEY`, and purge runs `VACUUM`, so SQLite may renumber rowids. A tailing reader could skip rows. Add an explicit non-reusable integer cursor column and page on it.
+- **R-3 Doctor is not read-only.** The `doctor` self-check calls `ccevent flush` (D7.2), which writes SQLite and offset files. Either drop the flush, or document `doctor` as mutating and add a separate read-only check.
+- **R-4 Loss accounting on full or unwritable storage.** The counter file, `trace_loss` and `emit.err` all live on the filesystem that just failed, so acceptance criterion A7 cannot pass for those causes. Provide an out-of-band loss channel, or state that storage-write failures are unobservable.
+- **R-5 Prune metadata on rebuild.** The tombstone and the retained `spool_loss` row live only in the derived database once phase 2 removes the spool. A rebuild from spool loses them. Persist prune metadata in a canonical sidecar that rebuild replays.
+- **R-6 Reserve at aggregate caps.** The 10% lifecycle reserve (D7.5) applies per batch spool only. The total-directory and pending-event caps can still be exhausted by other batches' `log` events. Reserve lifecycle capacity at every cap.
