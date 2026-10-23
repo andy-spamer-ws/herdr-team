@@ -209,6 +209,17 @@ check_on_path() {
 
 check_on_path "ccd resolves to this bundle" ccd "$BUNDLE_ROOT/bin/ccd"
 check_on_path "ccw resolves to this bundle" ccw "$BUNDLE_ROOT/bin/ccw"
+check_on_path "outcomes-pane resolves to this bundle" outcomes-pane "$BUNDLE_ROOT/bin/outcomes-pane"
+
+# --------------------------------------------- 11. outcomes skill (required)
+# outcomes-pane is a thin wrapper around the outcomes skill's oc.py — it has
+# no database logic of its own, so without oc.py it cannot render anything.
+OUTCOMES_OC_PY="${OC_PY:-$COPILOT_DIR/skills/outcomes/oc.py}"
+if [ -r "$OUTCOMES_OC_PY" ]; then
+  pass "outcomes skill (oc.py) readable" "$OUTCOMES_OC_PY"
+else
+  fail "outcomes skill (oc.py) readable" "$OUTCOMES_OC_PY missing — install the outcomes skill, or set OC_PY; outcomes-pane hard-requires it"
+fi
 
 # ----------------------------------------------------------------- summary
 printf '\nsummary      %d pass, %d warn, %d fail\n' "$N_PASS" "$N_WARN" "$N_FAIL"
