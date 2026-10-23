@@ -83,16 +83,15 @@ their own worktree.
 Enumerate the files the brief will touch, then ask who else is touching them:
 
 ```bash
-# the files this brief will change, one per line
-cat > /tmp/oc-scope.txt <<'EOF'
-apps/bff/src/bff/ai/summary_cache.py
-apps/bff/src/bff/routes/ai.py
-EOF
+# the files this brief will change, one per line (a variable, not a file:
+# the orchestrator writes no files, so no redirection or heredoc)
+scope='apps/bff/src/bff/ai/summary_cache.py
+apps/bff/src/bff/routes/ai.py'
 
 # open pull requests touching any of them
 for pr in $(gh pr list --state open --json number --jq '.[].number'); do
   gh pr view "$pr" --json files --jq '.files[].path' \
-    | grep -qFf /tmp/oc-scope.txt \
+    | grep -qFf <(printf '%s\n' "$scope") \
     && gh pr view "$pr" --json number,title,headRefName \
          --jq '"COLLISION pr#\(.number) \(.headRefName) — \(.title)"'
 done
@@ -100,7 +99,7 @@ done
 # your own unmerged worktrees touching any of them
 git worktree list --porcelain | awk '/^worktree /{print $2}' | while read -r wt; do
   git -C "$wt" diff --name-only "$(git -C "$wt" merge-base HEAD origin/main)" \
-    | grep -qFf /tmp/oc-scope.txt && echo "COLLISION worktree $wt"
+    | grep -qFf <(printf '%s\n' "$scope") && echo "COLLISION worktree $wt"
 done
 ```
 
