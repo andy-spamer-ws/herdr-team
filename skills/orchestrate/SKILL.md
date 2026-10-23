@@ -88,12 +88,15 @@ Enumerate the files the brief will touch, then ask who else is touching them:
 scope='apps/bff/src/bff/ai/summary_cache.py
 apps/bff/src/bff/routes/ai.py'
 
-# open pull requests touching any of them (paginated: every PR, every file)
-for pr in $(gh api --paginate 'repos/{owner}/{repo}/pulls?state=open&per_page=100' --jq '.[].number'); do
-  gh api --paginate "repos/{owner}/{repo}/pulls/$pr/files?per_page=100" --jq '.[].filename' \
-    | grep -qxFf <(printf '%s\n' "$scope") \
-    && gh pr view "$pr" --json number,title,headRefName \
-         --jq '"COLLISION pr#\(.number) \(.headRefName) — \(.title)"'
+# open pull requests touching any of them (paginated: every PR, every file,
+# both sides of a rename; a failed request prints UNCHECKED, never silence)
+prs=$(gh api --paginate 'repos/{owner}/{repo}/pulls?state=open&per_page=100' --jq '.[].number') \
+  || echo "UNCHECKED open pull requests (listing failed)"
+for pr in $prs; do
+  files=$(gh api --paginate "repos/{owner}/{repo}/pulls/$pr/files?per_page=100" \
+            --jq '.[] | .filename, (.previous_filename // empty)') \
+    || { echo "UNCHECKED pr#$pr (file list failed)"; continue; }
+  printf '%s\n' "$files" | grep -qxFf <(printf '%s\n' "$scope") && echo "COLLISION pr#$pr"
 done
 
 # your own unmerged worktrees touching any of them, committed or not
@@ -102,7 +105,7 @@ git worktree list --porcelain | sed -n 's/^worktree //p' | while read -r wt; do
   base=$(git -C "$wt" symbolic-ref -q --short refs/remotes/origin/HEAD) \
     && mb=$(git -C "$wt" merge-base HEAD "$base") \
     || { echo "UNCHECKED worktree $wt (no default remote branch)"; continue; }
-  { git -C "$wt" diff --name-only "$mb"
+  { git -C "$wt" diff --no-renames --name-only "$mb"
     git -C "$wt" ls-files --others --exclude-standard; } \
     | grep -qxFf <(printf '%s\n' "$scope") && echo "COLLISION worktree $wt"
 done
@@ -417,13 +420,20 @@ reachable from several checkouts it will guess wrong — `.venv/bin/python` vers
 service subdirectory. A verifier running the wrong interpreter reports green
 against the wrong dependency set, which is worse than reporting nothing.
 
-Resolve it once, before dispatch, and paste the literal command into the DoD:
+Resolve it once, before dispatch, and paste the literal command into the DoD.
+The `repo-env` and `outcomes` skills are not part of this bundle. Use them when
+they are installed:
 
 ```bash
 python3 ~/.copilot/skills/repo-env/repoenv.py show --repo <worktree>
 ```
 
-Better, name it once in the repository and let both of you refer to the name:
+Without them, read the command from the repository's own CI workflow or README,
+run it once in the worktree yourself through a `mechanical` worker, and paste
+the command that worked.
+
+Better, when the `outcomes` skill is installed, name it once in the repository
+and let both of you refer to the name:
 
 ```bash
 python3 ~/.copilot/skills/outcomes/oc.py profile list    # resolved, per checkout
@@ -571,8 +581,9 @@ gh pr list --state merged --search "merged:>=<batch start date>" --limit 1000 \
 gh pr list --state open --limit 1000 --json number,title,headRefName
 ```
 
-Pass that plus the open decisions to the **handoff** skill, which writes the
-checkpoint (you write no files yourself), then start a new session and read it. Everything else in the transcript is recoverable from the
+Dispatch a `mechanical` worker to write that plus the open decisions as a
+checkpoint with the **handoff** skill (loading a skill yourself does not
+delegate the write), then start a new session and read the checkpoint. Everything else in the transcript is recoverable from the
 repository, the outcomes database, or GitHub — which is precisely why carrying
 it is waste.
 
