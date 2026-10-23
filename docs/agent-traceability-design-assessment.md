@@ -1090,7 +1090,7 @@ No CI, no runner. `tests/run-all.sh` lands in S3.
 
 ### Open review findings to resolve before an implementation brief
 
-A design review on 2026-10-23 raised these gaps. They are not resolved in this assessment. An implementation brief must settle each one first.
+The local design review and the hosted Copilot review on 2026-10-23 raised these gaps. They are not resolved in this assessment. An implementation brief must settle each one first.
 
 - **R-1 Fallback batch id.** The `tab-<tab_id>` fallback (D4) is unavailable for `dispatch_start`, which `ccw` emits before it acquires a tab. Reusing it across invocations also collides natural idempotency keys such as `<agent>:dispatch_start`. Mint and export a fresh fallback id before the first emit.
 - **R-2 Cursor stability.** `events` has no `INTEGER PRIMARY KEY`, and purge runs `VACUUM`, so SQLite may renumber rowids. A tailing reader could skip rows. Add an explicit non-reusable integer cursor column and page on it.
@@ -1098,3 +1098,9 @@ A design review on 2026-10-23 raised these gaps. They are not resolved in this a
 - **R-4 Loss accounting on full or unwritable storage.** The counter file, `trace_loss` and `emit.err` all live on the filesystem that just failed, so acceptance criterion A7 cannot pass for those causes. Provide an out-of-band loss channel, or state that storage-write failures are unobservable.
 - **R-5 Prune metadata on rebuild.** The tombstone and the retained `spool_loss` row live only in the derived database once phase 2 removes the spool. A rebuild from spool loses them. Persist prune metadata in a canonical sidecar that rebuild replays.
 - **R-6 Reserve at aggregate caps.** The 10% lifecycle reserve (D7.5) applies per batch spool only. The total-directory and pending-event caps can still be exhausted by other batches' `log` events. Reserve lifecycle capacity at every cap.
+- **R-7 Tombstone columns.** The two-phase prune (D8) writes `pruned_at` and `files_pending` to `batches`, but the D3 schema has neither column. Add them to the schema.
+- **R-8 Missing database.** Recovery resets offsets only on `SQLITE_CORRUPT` or `NOTADB`. A deleted `trace.db` is silently recreated empty, and the stale `.offset` files then skip spool records already ingested (T4, A1-3). A missing database must invalidate every offset before replay.
+- **R-9 Purge scope.** `purge` omits `quarantine/` (D3) and the `trace.db.corrupt.<ts>` snapshots (D7.3), both of which can hold payloads. A leaked secret survives `purge --all --yes`. Include them in purge and its acceptance criteria.
+- **R-10 Replay rationale.** Random ids survive replay when they are minted once at emit and persisted in the spool, as `event_id` already is. Correct the rationale that presents content-derived ids as a prerequisite for replay.
+- **R-11 Physical size cap.** SQLite `DELETE` frees pages but does not shrink `trace.db`, so pruning alone cannot enforce `CCT_RETAIN_MAX_BYTES` on disk. Specify compaction, or distinguish logical size from disk usage.
+- **R-12 Rebuild equivalence.** `ingested_at` is regenerated on rebuild, so byte-equivalent rows cannot be required. Compare canonical event content and exclude regenerated ingestion metadata.
