@@ -87,11 +87,15 @@ EOF
   exit 2
 }
 
+need_value() {
+  [[ $# -ge 2 ]] || { printf 'outcomes-pane: %s needs a value\n' "$1" >&2; usage; }
+}
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --db)       DB="${2:-}"; shift 2 ;;
-    --oc-py)    OC_PY_PATH="${2:-}"; shift 2 ;;
-    --interval) INTERVAL="${2:-}"; shift 2 ;;
+    --db)       need_value "$@"; DB="$2"; shift 2 ;;
+    --oc-py)    need_value "$@"; OC_PY_PATH="$2"; shift 2 ;;
+    --interval) need_value "$@"; INTERVAL="$2"; shift 2 ;;
     --once)     ONCE=1; shift ;;
     -h|--help)  usage ;;
     *) printf 'outcomes-pane: unknown option %s\n' "$1" >&2; usage ;;
@@ -131,6 +135,12 @@ export OC_DB="$DB"
 
 render_once() {
   local ts db_where
+  # Re-check every refresh: oc.py status would silently recreate a deleted
+  # database as an empty one and render "no outcomes" instead of an error.
+  if [[ ! -f "$DB" ]]; then
+    printf 'outcomes-pane: outcomes database not found at %s — it was moved or deleted\n' "$DB" >&2
+    return 1
+  fi
   ts="$(date '+%Y-%m-%d %H:%M:%S')"
   if ! db_where=$(python3 "$OC_PY_PATH" where 2>&1); then
     printf 'outcomes-pane: %s where failed\n%s\n' "$OC_PY_PATH" "$db_where" >&2

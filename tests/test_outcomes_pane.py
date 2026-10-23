@@ -220,6 +220,26 @@ class OutcomesPaneTestCase(unittest.TestCase):
         self.assertEqual(result.returncode, 2)
         self.assertIn("usage: outcomes-pane", result.stderr)
 
+    def test_option_without_value_fails_with_usage(self):
+        result = run_pane(["--db"], timeout=5)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("--db needs a value", result.stderr)
+
+    def test_database_deleted_while_running_fails_and_is_not_recreated(self):
+        self.seed()
+        env = dict(os.environ)
+        env.pop("OC_DB", None)
+        proc = subprocess.Popen(
+            [str(OUTCOMES_PANE), "--db", str(self.db), "--oc-py", str(self.fake_oc), "--interval", "1"],
+            env=env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True,
+        )
+        time.sleep(1.5)
+        self.db.unlink()
+        _, stderr = proc.communicate(timeout=10)
+        self.assertEqual(proc.returncode, 1)
+        self.assertIn("moved or deleted", stderr)
+        self.assertFalse(self.db.exists())
+
     def test_invalid_interval_rejected(self):
         self.seed()
         result = run_pane(

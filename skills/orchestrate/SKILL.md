@@ -134,9 +134,9 @@ Before the first pane opens, turn DONE WHEN into outcomes the `outcomes`
 skill can verify by running a command, never by an agent's word:
 
 ```bash
-# one fresh database per goal, beside the orchestrator's session database, so
-# the pane and the final gate hold only this goal's outcomes
-OC_DB="$(dirname "$(python3 ~/.copilot/skills/outcomes/oc.py where)")/outcomes-fix-90.db"
+# one fresh database per invocation, beside the orchestrator's session database,
+# so the pane and the final gate hold only this run's outcomes
+OC_DB="$(dirname "$(python3 ~/.copilot/skills/outcomes/oc.py where)")/outcomes-fix-90-$(date +%Y%m%dT%H%M%S).db"
 export OC_DB
 python3 ~/.copilot/skills/outcomes/oc.py add fix-90 "Fix 90" \
   --verify "cd /path/to/wt-90 && ./run-tests.sh"
@@ -151,9 +151,9 @@ Keep `$OC_DB`. It is what the outcomes pane in Space, below, pins to; what
 every `oc check` and the final `oc gate` for this goal target; and what you
 report as the DoD ledger in Report. Declare outcomes in the orchestrator's own
 session, never a worker's — the orchestrator's session outlives every delivery
-pane, including the workers themselves. Never reuse a previous goal's database:
-its verifiers point at worktrees that Clean up has already removed, so its rows
-would fail this goal's gate.
+pane, including the workers themselves. Never reuse a previous run's database,
+even for a retry of the same goal: its verifiers point at worktrees that Clean
+up has already removed, so its rows would fail this run's gate.
 
 Re-run `oc check` (or `oc check <id>`) whenever a worker or verifier reports
 progress, so the outcomes pane reflects reality within the batch, not just at
@@ -326,8 +326,9 @@ ccw verify-90 --role verify --cwd /path/to/wt-90 --tab <current_tab_id> --split 
 ccw review-90 --role review --cwd /path/to/wt-90 --tab <current_tab_id> --split down --no-focus
 ```
 
-When a worker's pane closes (see Clean up), remove its worktree so the repo
-does not accumulate stale checkouts:
+When a worker's pane closes (see Clean up), and only after the final `oc gate`
+has run (its verifiers `cd` into these worktrees), remove its worktree so the
+repo does not accumulate stale checkouts:
 
 ```bash
 git -C /path/to/repo worktree remove /path/to/wt-90
@@ -563,6 +564,10 @@ brief was wrong, not the worker.
 
 ## 12. Clean up
 
+**Gate first.** Run the final `oc gate` from Report, and keep its exit code,
+before you remove any worktree: the declared verifiers `cd` into those
+worktrees, so a gate run after removal fails on a missing path.
+
 A pane is closable when `herdr agent get <name>` reports `agent_status`
 `idle` or `done`. Do not call `pane process-info` on a copilot worker pane — the
 copilot REPL is always a foreground process there, so the "no foreground
@@ -610,9 +615,10 @@ Tell the user what was delegated, in which tab, under which agent names, and
 what the verdict was. Names, not pane ids. Say plainly whether review ran or
 was skipped by default — do not imply it happened when it did not.
 
-Before calling anything done, run the batch's definition-of-done gate against
-the outcomes declared in Outcomes, and report its exit code verbatim — never a
-paraphrase of what you expect it to say:
+Before calling anything done, report the batch's definition-of-done gate
+against the outcomes declared in Outcomes — the one you ran at the start of
+Clean up, before any worktree was removed — and its exit code verbatim, never
+a paraphrase of what you expect it to say:
 
 ```bash
 OC_DB="$OC_DB" python3 ~/.copilot/skills/outcomes/oc.py gate

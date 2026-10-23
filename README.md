@@ -169,7 +169,7 @@ sitting in:
 herdr pane get "$HERDR_PANE_ID"
 # -> result.pane.workspace_id (the current workspace), result.pane.tab_id (the current tab)
 
-OC_DB="$(dirname "$(python3 ~/.copilot/skills/outcomes/oc.py where)")/outcomes-fix-90.db"   # one per goal
+OC_DB="$(dirname "$(python3 ~/.copilot/skills/outcomes/oc.py where)")/outcomes-fix-90-$(date +%Y%m%dT%H%M%S).db"   # one per run
 export OC_DB
 python3 ~/.copilot/skills/outcomes/oc.py add fix-90 "Fix 90" \
   --verify "cd /path/to/wt-90 && ./run-tests.sh"
