@@ -142,6 +142,10 @@ python3 ~/.copilot/skills/outcomes/oc.py add fix-90 "Fix 90" \
   --verify "cd /path/to/wt-90 && ./run-tests.sh"
 ```
 
+Every `oc.py` command in this skill uses the default install path. If the
+outcomes skill lives elsewhere (the `OC_PY` that `orchestrate-doctor` and
+`outcomes-pane` honour), substitute `python3 "$OC_PY"` throughout.
+
 Declaring and checking outcomes (`oc.py add`, `check`, `gate`, `where`,
 `status`) is bookkeeping in the orchestrator's own session directory, not
 delivery work — it is allowed under the bash restrictions the same way
