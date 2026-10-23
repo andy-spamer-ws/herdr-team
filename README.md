@@ -28,7 +28,10 @@ There is no tmux fallback and no multiplexer abstraction. `ccd` and `ccw` shell
 out to `herdr pane split`, `herdr tab create`, `herdr agent start` and
 `herdr pane close` directly and parse herdr's JSON.
 
-Beyond herdr, the only requirements are `bash`, `python3` and `copilot`.
+Beyond herdr, the only requirements are `bash`, `python3` and `copilot`. The
+outcomes pane also requires the **outcomes skill**
+(`~/.copilot/skills/outcomes/oc.py`) to be installed — it renders that skill's
+own status, never a database of its own.
 
 ## What is in the bundle
 
@@ -41,18 +44,21 @@ uninstall.sh                             remove only what it installed
 bin/ccd                                  launcher: herdr session + --agent orchestrator
 bin/ccw                                  worker dispatcher: name + role -> model, pane, agent start
 bin/orchestrate-doctor                   readiness check
+bin/outcomes-pane                        renders `oc` status continuously in a dedicated pane
 lib/roles.sh                             the role-to-model table, shared by ccd and ccw
 agents/orchestrator.md                   the delegation-only agent definition
 agents/pre-pr-reviewer.md                the adversarial pre-PR review agent definition
-skills/orchestrate/SKILL.md              the 11-step lifecycle and command reference
+skills/orchestrate/SKILL.md              the 13-step lifecycle and command reference
 skills/pre-pr-review/SKILL.md            the investigation lines the reviewer works from
 prompts/sr_opus_5_system_prompt.md       vendored SR communication addendum
 prompts/LICENSE-fixing-smartass-opus-5   its MIT licence
 ```
 
 `ccd` starts the orchestrator. `ccw` is what the orchestrator uses to start
-workers. The agent definition is what makes the lead refuse to do the work
-itself. The skill is what tells it how to dispatch properly.
+workers. `outcomes-pane` is the mandatory status board every goal workspace
+carries — see [Outcomes pane](#outcomes-pane) below. The agent definition is
+what makes the lead refuse to do the work itself. The skill is what tells it
+how to dispatch properly.
 
 ## Install
 
@@ -61,13 +67,14 @@ itself. The skill is what tells it how to dispatch properly.
 ./install.sh
 ```
 
-It creates seven symlinks, all pointing back into the bundle:
+It creates eight symlinks, all pointing back into the bundle:
 
 | Symlink | Target |
 |---------|--------|
 | `<prefix>/ccd` | `<bundle>/bin/ccd` |
 | `<prefix>/ccw` | `<bundle>/bin/ccw` |
 | `<prefix>/orchestrate-doctor` | `<bundle>/bin/orchestrate-doctor` |
+| `<prefix>/outcomes-pane` | `<bundle>/bin/outcomes-pane` |
 | `<copilot-dir>/agents/orchestrator.md` | `<bundle>/agents/orchestrator.md` |
 | `<copilot-dir>/agents/pre-pr-reviewer.md` | `<bundle>/agents/pre-pr-reviewer.md` |
 | `<copilot-dir>/skills/orchestrate` | `<bundle>/skills/orchestrate` |
@@ -152,13 +159,23 @@ That opens a herdr session, creates a tab named `orch-<dirname>`, and boots
 Copilot in it with the `orchestrator` agent at the orchestrator role.
 
 From there the orchestrator opens one herdr workspace for the goal, renames its
-default tab, and puts every worker for that goal in a pane there — on its own
-new git worktree, never the checkout the orchestrator itself is sitting in:
+default tab, declares outcomes and opens the mandatory outcomes pane — all
+before any worker — and puts every worker for that goal in a pane there, on
+its own new git worktree, never the checkout the orchestrator itself is
+sitting in:
 
 ```bash
 herdr workspace create --label fix-89-90 --cwd /path/to/repo --no-focus
 # -> result.workspace.workspace_id, result.tab.tab_id (default tab), result.root_pane.pane_id
 herdr tab rename <tab-id> fix-89-90
+
+OC_DB=/path/to/repo/.oc/fix-89-90.db python3 ~/.copilot/skills/outcomes/oc.py add fix-90 \
+  "Fix 90" --verify "cd /path/to/wt-90 && ./run-tests.sh"
+
+herdr pane split --pane <root-pane-of-tab-id> --direction down --cwd /path/to/repo --no-focus
+# -> result.pane.pane_id, the outcomes pane (a plain pane, never an agent)
+herdr pane rename <outcomes-pane-id> outcomes
+herdr pane run <outcomes-pane-id> outcomes-pane --db /path/to/repo/.oc/fix-89-90.db
 
 herdr worktree create --cwd /path/to/repo --branch fix/90 --label fix-90 --no-focus
 ```
@@ -230,8 +247,8 @@ its default placement splits the pane you are in — and `--new-tab` lands in
 whatever workspace that pane belongs to, so run it from a pane already inside
 the goal workspace.
 
-The full lifecycle — Scope, Space, Route, Name, Role, Dispatch, Supervise,
-Verify, Review (optional), Correct once, Clean up, Report — is in
+The full lifecycle — Scope, Outcomes, Space, Route, Name, Role, Dispatch,
+Supervise, Verify, Review (optional), Correct once, Clean up, Report — is in
 `skills/orchestrate/SKILL.md`, along with the routing table and the verified
 herdr 0.8.0 command reference. Verification is mandatory; adversarial review
 is off by default and only dispatched when explicitly requested.
@@ -255,17 +272,55 @@ Checks: bash version (warn only, under 3.2), `herdr` on PATH **and at least
 pane), the addendum source being readable and its block being installed,
 `orchestrator.md` and the `orchestrate` skill installed and resolving back into
 this bundle, `pre-pr-reviewer.md` and the `pre-pr-review` skill installed and
-resolving back into this bundle, and `ccd` and `ccw` on PATH resolving back
-into this bundle.
+resolving back into this bundle, `ccd`, `ccw` and `outcomes-pane` on PATH
+resolving back into this bundle, and — separately — the outcomes skill's
+`oc.py` being readable (`outcomes-pane` hard-requires it; `OC_PY` overrides
+the path it checks).
 
-For the last six, severity depends on what is actually there. Missing entirely
+For the first seven of those (everything up to and including `ccd`/`ccw`/
+`outcomes-pane`), severity depends on what is actually there. Missing entirely
 is a `FAIL` — run `./install.sh`. Resolving into this bundle is a `PASS`.
 Present and working but resolving somewhere else is a `WARN`: that is the
 expected state when this bundle sits alongside an existing install, nothing is
-broken, and `./install.sh --force` is how you switch over if you want to.
+broken, and `./install.sh --force` is how you switch over if you want to. The
+`oc.py` check has no such middle state: it is a `PASS` if readable, a `FAIL`
+if not — the outcomes skill is either installed where `outcomes-pane` expects
+it or it is not.
 
 It exits 0 when nothing failed, 1 otherwise. Warnings never change the exit
 status, so a run with warnings and no failures still reads as ready.
+
+## Outcomes pane
+
+Every goal workspace this bundle opens carries exactly one **outcomes pane** —
+a non-agent pane that continuously renders the `outcomes` skill's own,
+database-backed status. It is not optional and it is not a worker: no model
+runs in it, it is a display.
+
+```bash
+outcomes-pane --db "$(oc.py where)"          # continuous, refreshes on an interval
+outcomes-pane --db "$(oc.py where)" --once   # one render, then exit — deterministic
+```
+
+- `--db PATH` (or `OC_DB`) is **required** — the pane is pinned to one specific
+  outcomes database and never guesses or falls back to "most recently
+  written session" the way `oc.py` itself does when unpinned.
+- `--oc-py PATH` (or `OC_PY`) overrides where it looks for the outcomes
+  skill's `oc.py`; the default is `$HOME/.copilot/skills/outcomes/oc.py`.
+- `--interval SECONDS` sets the refresh cadence (default 5).
+- `--once` renders a single refresh and exits — the mode this bundle's own
+  tests, and any scripted DoD check, use.
+
+It never touches SQLite directly: every render shells out to `oc.py where` and
+`oc.py status`, so what appears in the pane is exactly what `oc gate` and `oc
+check` would also derive — never an agent's summary of its own work. A
+missing database or a missing/misconfigured `oc.py` is a hard, explicit error
+(non-zero exit, message on stderr) rather than an empty or success-shaped
+display.
+
+`skills/orchestrate/SKILL.md` documents exactly when the pane is opened (before
+any delivery agent, in the goal workspace's renamed default tab), how it is
+pinned, and when it is closed.
 
 ## Vendored prompt
 
