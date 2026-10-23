@@ -108,8 +108,9 @@ Probes, by shape of change:
   not necessarily reachable. These systems keep **several hand-maintained
   registration lists** (a build config's per-route entrypoints, a local dev
   server's explicit route table, an IaC/API-gateway definition, a nav manifest),
-  and a route must appear in every one. Enumerate them and check each. Crucially,
-  different lists fail in **different environments**: a missing dev-server route
+  and a route must appear in every list used by its supported build and
+  deployment paths. Enumerate those lists and check each. Crucially, different
+  lists fail in **different environments**: a missing dev-server route
   is a 404 only locally, a missing gateway route only when deployed. Green CI
   proves neither. Exercise the route — `curl` the endpoint, build and `ls` the
   output directory — and never trust a dev server, which typically serves the
