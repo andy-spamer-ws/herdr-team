@@ -400,7 +400,8 @@ CREATE TABLE IF NOT EXISTS events (
 CREATE UNIQUE INDEX IF NOT EXISTS events_idem ON events(batch_id, idem_key)
   WHERE idem_key IS NOT NULL;
 CREATE INDEX IF NOT EXISTS events_batch ON events(batch_id, seq);
-CREATE INDEX IF NOT EXISTS events_cursor ON events(batch_id, rowid);
+-- no cursor index: SQLite rejects rowid as an index column ("no such column: rowid"),
+-- and every secondary index already ends in rowid, so (batch_id) lookups page by rowid.
 
 CREATE TABLE IF NOT EXISTS spool_loss (         -- overflow accounting, D7
   batch_id   TEXT,
@@ -593,9 +594,12 @@ because it cannot drop; it fails instead. The target drops, so it must account:
 3. A `trace_loss` **event** is emitted into the spool on the first drop per batch per reason, and
    at most once per minute after — so the gap is visible in the stream itself, not only in a
    sidecar table.
-4. **Drop policy is oldest-first for `log`-class events and newest-first never**: lifecycle events
-   (`dispatch_*`, `agent_started`, `verify_result`, `review_verdict`, `batch_end`) are
-   never dropped ahead of a `log` event. Losing chatter is acceptable; losing the outcome is not.
+4. **Drop policy is admission-time, and lifecycle events have reserved headroom**: the spool is
+   append-only, so nothing already written is ever removed. `log`-class events are refused once
+   a spool reaches 90% of its cap. The last 10% is reserved for lifecycle events (`dispatch_*`,
+   `agent_started`, `verify_result`, `review_verdict`, `batch_end`) and `trace_loss`, so those
+   can still be appended after chatter stops being accepted. Only the hard cap refuses them, and
+   that refusal is still counted. Losing chatter is acceptable; losing the outcome is not.
 5. A reader must render any batch with `spool_loss` rows or a `trace_loss` event as **incomplete**,
    and must not compute completeness metrics over it.
 
@@ -605,14 +609,16 @@ because it cannot drop; it fails instead. The target drops, so it must account:
 trace_emit() {
   [ "${CCT_TRACE:-1}" = 1 ] || return 0
   command -v ccevent >/dev/null 2>&1 || return 0
-  ( timeout "${CCT_EMIT_TIMEOUT:-5}" ccevent emit "$@" \
-      >/dev/null 2>>"${CCT_TRACE_ERRLOG:-$CCT_TRACE_HOME/emit.err}" ) || true
+  ( ccevent emit --timeout "${CCT_EMIT_TIMEOUT:-5}" "$@" \
+      >/dev/null 2>/dev/null ) || true
   return 0
 }
 ```
 
 Every clause is load-bearing under `bin/ccw:34`: the subshell contains `set -e` effects,
-`timeout` bounds a hung emitter, `|| true` neutralises any exit code, stderr is redirected so
+`ccevent` bounds itself with `--timeout` (a Python `signal.alarm`, because GNU `timeout` is absent on
+stock macOS), and it creates the trace home and appends its own failures to `emit.err` there, so
+the shell never opens a path that may not exist yet. `|| true` neutralises any exit code, stderr is discarded so
 `ccw`'s machine-readable success line (`bin/ccw:273-275`) is untouched, and `return 0` makes the
 function safe in any position. `CCT_TRACE=0` short-circuits before `python3` is ever started —
 required for `--dry-run` (`bin/ccw:152-176`) and for tests.
@@ -657,12 +663,15 @@ consistent:
 A batch is eligible only when it is terminal (`success`, `fail`, `abandoned`) **and** fully flushed
 (offset at EOF). A `running` batch is never pruned regardless of age.
 
-**`ccevent prune`** reclaims space while preserving accounting. Per eligible batch, in one
-transaction: delete its `events`, `agents` and `batches` rows; delete the spool file, or gzip it to
-`archive/` when `CCT_TRACE_ARCHIVE=1`; delete offset and counter files; **retain** the `spool_loss`
-row; and insert a `batches` tombstone (`batch_id`, `status`, `started_at`, `ended_at`, `pruned_at`)
-so a reader can tell "this batch never existed" from "this batch aged out". `--dry-run` lists what
-would go without touching anything.
+**`ccevent prune`** reclaims space while preserving accounting. Per eligible batch, in two phases,
+because file operations cannot join a SQLite transaction. Phase 1 is one transaction: delete its
+`events`, `agents` and `batches` rows, **retain** the `spool_loss` row, and insert a `batches`
+tombstone (`batch_id`, `status`, `started_at`, `ended_at`, `pruned_at`, `files_pending=1`) so a
+reader can tell "this batch never existed" from "this batch aged out". Phase 2 runs only after
+that commit: delete the spool file, or gzip it to `archive/` when `CCT_TRACE_ARCHIVE=1`, delete
+offset and counter files, then clear `files_pending`. A crash between the phases leaves a tombstone
+with `files_pending=1`, and the next prune or flush finishes phase 2. No file is removed while the
+database still holds rows that depend on it. `--dry-run` lists what would go without touching anything.
 
 **`ccevent purge`** is irreversible deletion for a privacy request or a leaked secret:
 `--batch <id>` or `--all`, requires `--yes`, and removes rows, spool, offsets, counters, archives
@@ -834,7 +843,7 @@ A1 and A2 in Part 5 test exactly that.
 - **Dependencies:** none added. `python3` is already required (`bin/ccw:178`, `bin/ccd:129`);
   `sqlite3`, `json`, `fcntl`, `hashlib`, `secrets` are stdlib.
 - **Latency on the dispatch path:** one `python3` start plus one append per event, ~30-60 ms, hard
-  capped at `timeout 5`. Five deterministic events add ~0.2-0.3 s to a dispatch that already waits
+  capped at `--timeout 5`. Five deterministic events add ~0.2-0.3 s to a dispatch that already waits
   up to 120 s for copilot (`bin/ccw:66`). **SQLite work is off this path entirely** (D7.2), so db
   contention cannot slow a dispatch at all.
 - **Backwards compatibility:** `ccw`'s stdout contract (`bin/ccw:273-275`) and exit codes are
@@ -931,7 +940,7 @@ pointed at a temp dir and a `trap` cleanup.
 | T16 | permissions | home `0700`, spool/db/wal/shm `0600` under a permissive umask; doctor FAILs when a file is chmod `0644` |
 | T17 | spool overflow | with a 4 KB cap, excess events are dropped, `.dropped` increments, `spool_loss` populated after flush, a `trace_loss` event appears, and a `log` event is dropped before a lifecycle event |
 | T18 | loss observability | `ccevent status --json` and `orchestrate-doctor` both report backlog and dropped counts non-zero |
-| T19 | failed-emission continuity — trace home unwritable / `ccevent` absent / emitter hung past `timeout` / disk full | `ccw` exits 0 in all four, `agent start` still logged, stdout unchanged |
+| T19 | failed-emission continuity — trace home unwritable / `ccevent` absent / emitter hung past `--timeout` / disk full | `ccw` exits 0 in all four, `agent start` still logged, stdout unchanged |
 | T20 | failure-path event | a failing `herdr agent start` yields `dispatch_fail` **and** still closes the pane (`bin/ccw:265-269`) |
 | T21 | migration — old reader vs new db | a reader selecting only v1 columns works against `schema_version` 3 |
 | T22 | migration — new reader vs old db | absent columns read as null, no exception |
@@ -974,7 +983,7 @@ No CI, no runner. `tests/run-all.sh` lands in S3.
 | **Q6** | Retention defaults — age, count, size, or all three (proposed)? | O6a age only · O6b count only · O6c all three, first-to-trigger wins |
 | **Q7** | Is capturing brief text (even opt-in) acceptable given work happens in corporate repos? | O7a hash-only, remove `CCT_TRACE_BRIEFS` entirely · O7b opt-in as proposed |
 | **Q8** | Flush trigger policy | O8a opportunistic only (proposed: `ccd`, read commands, doctor) · O8b add a `systemd --user` timer / launchd agent · O8c flush inside `ccw` after the pane is up (rejected: reintroduces db work on the dispatch path) |
-| **Q9** | Drop policy under overflow | O9a drop `log`-class oldest-first, never lifecycle (proposed) · O9b drop everything oldest-first · O9c block the emitter (rejected: violates non-blocking) |
+| **Q9** | Drop policy under overflow | O9a refuse new `log`-class events at 90% of the cap, reserve the rest for lifecycle and `trace_loss` (proposed) · O9b refuse every event at the cap · O9c block the emitter (rejected: violates non-blocking) |
 | **Q10** | Does `event_version` need per-type versioning, or is one global record version enough? | O10a one global version (proposed) · O10b per-type payload versions |
 | **Q11** | Where do annotations live if they are ever wanted? | O11a separate `annotations.db` beside the store (proposed) · O11b a service · O11c never build them |
 
