@@ -104,6 +104,29 @@ Probes, by shape of change:
   that is actually instantiated?
 - **Environment** — is the env var now read ever set, in any environment file,
   CI config, or deploy manifest?
+- **Routes, endpoints and pages** — a route registered in the app's router is
+  not necessarily reachable. These systems keep **several hand-maintained
+  registration lists** (a build config's per-route entrypoints, a local dev
+  server's explicit route table, an IaC/API-gateway definition, a nav manifest),
+  and a route must appear in every list used by its supported build and
+  deployment paths. Enumerate those lists and check each. Crucially, different
+  lists fail in **different environments**: a missing dev-server route
+  is a 404 only locally, a missing gateway route only when deployed. Green CI
+  proves neither. Exercise the route — `curl` the endpoint, build and `ls` the
+  output directory — and never trust a dev server, which typically serves the
+  app shell for any path and hides a missing entrypoint entirely.
+
+**Evidence — execution tracker, two failures of one shape:** a page and its
+endpoint shipped with a router branch, nav entry, component, handler, IaC
+resource and 33 passing tests. The user saw a different page's content, then a
+`404`. Two separate hand-maintained lists had never been updated: the build
+config's per-route entrypoint array, so nothing existed at that path in `dist/`;
+and the local dev server's explicit route table, so the endpoint 404'd in dev
+while working in production. Every test passed both times, because these lists
+are configuration and nothing under test reads them. Three "it's done" claims
+were made on green tests alone; all three were wrong, and the decisive evidence
+came from the user's browser console each time. `curl` on the endpoint and `ls`
+on the build output would have caught both in under a minute.
 
 **Evidence from PR 33:** the change remapped 123 font-size and 105 font-weight
 declarations onto design tokens. Measurement afterwards found **39 selectors
