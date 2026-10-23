@@ -89,21 +89,26 @@ scope='apps/bff/src/bff/ai/summary_cache.py
 apps/bff/src/bff/routes/ai.py'
 
 # open pull requests touching any of them
-for pr in $(gh pr list --state open --json number --jq '.[].number'); do
+for pr in $(gh pr list --state open --limit 1000 --json number --jq '.[].number'); do
   gh pr view "$pr" --json files --jq '.files[].path' \
-    | grep -qFf <(printf '%s\n' "$scope") \
+    | grep -qxFf <(printf '%s\n' "$scope") \
     && gh pr view "$pr" --json number,title,headRefName \
          --jq '"COLLISION pr#\(.number) \(.headRefName) — \(.title)"'
 done
 
-# your own unmerged worktrees touching any of them
-git worktree list --porcelain | awk '/^worktree /{print $2}' | while read -r wt; do
-  git -C "$wt" diff --name-only "$(git -C "$wt" merge-base HEAD origin/main)" \
-    | grep -qFf <(printf '%s\n' "$scope") && echo "COLLISION worktree $wt"
+# your own unmerged worktrees touching any of them, committed or not
+git worktree list --porcelain | sed -n 's/^worktree //p' | while read -r wt; do
+  base=$(git -C "$wt" symbolic-ref -q --short refs/remotes/origin/HEAD) \
+    && mb=$(git -C "$wt" merge-base HEAD "$base") \
+    || { echo "UNCHECKED worktree $wt (no default remote branch)"; continue; }
+  { git -C "$wt" diff --name-only "$mb"
+    git -C "$wt" ls-files --others --exclude-standard; } \
+    | grep -qxFf <(printf '%s\n' "$scope") && echo "COLLISION worktree $wt"
 done
 ```
 
-A collision is a decision for the user, not something to route around. Say which
+An `UNCHECKED` line is not a pass: treat it as a collision you could not rule
+out. A collision is a decision for the user, not something to route around. Say which
 PR or worktree overlaps and which file, then offer the three options: rebase the
 brief onto that branch, narrow the brief to the non-overlapping files, or wait
 for the merge. Do not dispatch a brief you know collides and leave the conflict
@@ -423,7 +428,8 @@ Better, name it once in the repository and let both of you refer to the name:
 python3 ~/.copilot/skills/outcomes/oc.py profile list    # resolved, per checkout
 ```
 
-The DoD then reads "`oc profile run tests` exits 0" rather than a command string
+The DoD then reads "`python3 ~/.copilot/skills/outcomes/oc.py profile run tests`
+exits 0" rather than a command string
 that was correct on your machine. For anything a user is meant to see, require a
 `live:` profile as well — a green suite is silent on routing and registration,
 so it cannot be the whole DoD.
@@ -557,13 +563,13 @@ it and start clean:
 
 ```bash
 # the whole orchestrator state worth carrying
-oc status                      # outcomes and their evidence
-git -C <repo> log --oneline origin/main..   # what has landed
-gh pr list --state open --json number,title,headRefName
+python3 ~/.copilot/skills/outcomes/oc.py status   # outcomes and their evidence
+gh pr list --state merged --limit 50 --json number,title,mergedAt   # what has landed
+gh pr list --state open --limit 1000 --json number,title,headRefName
 ```
 
-Write that plus the open decisions to a checkpoint file, start a new session,
-and read the file. Everything else in the transcript is recoverable from the
+Pass that plus the open decisions to the **handoff** skill, which writes the
+checkpoint (you write no files yourself), then start a new session and read it. Everything else in the transcript is recoverable from the
 repository, the outcomes database, or GitHub — which is precisely why carrying
 it is waste.
 
