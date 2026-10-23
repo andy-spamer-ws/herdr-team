@@ -88,15 +88,16 @@ Enumerate the files the brief will touch, then ask who else is touching them:
 scope='apps/bff/src/bff/ai/summary_cache.py
 apps/bff/src/bff/routes/ai.py'
 
-# open pull requests touching any of them
-for pr in $(gh pr list --state open --limit 1000 --json number --jq '.[].number'); do
-  gh pr view "$pr" --json files --jq '.files[].path' \
+# open pull requests touching any of them (paginated: every PR, every file)
+for pr in $(gh api --paginate 'repos/{owner}/{repo}/pulls?state=open&per_page=100' --jq '.[].number'); do
+  gh api --paginate "repos/{owner}/{repo}/pulls/$pr/files?per_page=100" --jq '.[].filename' \
     | grep -qxFf <(printf '%s\n' "$scope") \
     && gh pr view "$pr" --json number,title,headRefName \
          --jq '"COLLISION pr#\(.number) \(.headRefName) — \(.title)"'
 done
 
 # your own unmerged worktrees touching any of them, committed or not
+# (base is origin's default branch; in a fork, set it to the branch you land on)
 git worktree list --porcelain | sed -n 's/^worktree //p' | while read -r wt; do
   base=$(git -C "$wt" symbolic-ref -q --short refs/remotes/origin/HEAD) \
     && mb=$(git -C "$wt" merge-base HEAD "$base") \
@@ -563,8 +564,10 @@ it and start clean:
 
 ```bash
 # the whole orchestrator state worth carrying
+python3 ~/.copilot/skills/outcomes/oc.py where    # the outcomes database: pin it with OC_DB in the new session
 python3 ~/.copilot/skills/outcomes/oc.py status   # outcomes and their evidence
-gh pr list --state merged --limit 50 --json number,title,mergedAt   # what has landed
+gh pr list --state merged --search "merged:>=<batch start date>" --limit 1000 \
+  --json number,title,mergedAt                    # what has landed this batch
 gh pr list --state open --limit 1000 --json number,title,headRefName
 ```
 
