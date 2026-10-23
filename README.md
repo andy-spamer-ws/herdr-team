@@ -169,9 +169,10 @@ sitting in:
 herdr pane get "$HERDR_PANE_ID"
 # -> result.pane.workspace_id (the current workspace), result.pane.tab_id (the current tab)
 
+OC_DB="$(dirname "$(python3 ~/.copilot/skills/outcomes/oc.py where)")/outcomes-fix-90.db"   # one per goal
+export OC_DB
 python3 ~/.copilot/skills/outcomes/oc.py add fix-90 "Fix 90" \
   --verify "cd /path/to/wt-90 && ./run-tests.sh"
-OC_DB="$(python3 ~/.copilot/skills/outcomes/oc.py where)"   # the orchestrator's own session database
 
 herdr pane split --pane "$HERDR_PANE_ID" --direction down --cwd /path/to/repo --no-focus
 # -> result.pane.pane_id, the outcomes pane (a plain pane, never an agent)
@@ -305,8 +306,8 @@ database-backed status. It is not optional and it is not a worker: no model
 runs in it, it is a display.
 
 ```bash
-outcomes-pane --db "$(oc.py where)"          # continuous, refreshes on an interval
-outcomes-pane --db "$(oc.py where)" --once   # one render, then exit — deterministic
+outcomes-pane --db "$OC_DB"          # continuous, refreshes on an interval
+outcomes-pane --db "$OC_DB" --once   # one render, then exit — deterministic
 ```
 
 - `--db PATH` (or `OC_DB`) is **required** — the pane is pinned to one specific

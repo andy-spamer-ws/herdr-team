@@ -34,7 +34,7 @@ and never creates layout of its own, and where herdr's own hierarchy is
 2. Every task, subagent, verifier, reviewer and worker for that invocation is a
    **pane in that same current tab**, alongside the orchestrator's own pane.
 3. Every invocation carries exactly **one outcomes pane** in that same current
-   tab, opened before any delivery agent, pinned to `oc.py where` — see
+   tab, opened before any delivery agent, pinned to this goal's `$OC_DB` — see
    Outcomes, below. It is a plain pane running `outcomes-pane`, never an
    agent.
 4. Shell commands that need their own pane and long-lived services may use
@@ -134,21 +134,26 @@ Before the first pane opens, turn DONE WHEN into outcomes the `outcomes`
 skill can verify by running a command, never by an agent's word:
 
 ```bash
+# one fresh database per goal, beside the orchestrator's session database, so
+# the pane and the final gate hold only this goal's outcomes
+OC_DB="$(dirname "$(python3 ~/.copilot/skills/outcomes/oc.py where)")/outcomes-fix-90.db"
+export OC_DB
 python3 ~/.copilot/skills/outcomes/oc.py add fix-90 "Fix 90" \
   --verify "cd /path/to/wt-90 && ./run-tests.sh"
-OC_DB="$(python3 ~/.copilot/skills/outcomes/oc.py where)"
 ```
 
 Declaring and checking outcomes (`oc.py add`, `check`, `gate`, `where`,
-`status`) is bookkeeping in the orchestrator's own session database, not
+`status`) is bookkeeping in the orchestrator's own session directory, not
 delivery work — it is allowed under the bash restrictions the same way
 managing your own todos is.
 
 Keep `$OC_DB`. It is what the outcomes pane in Space, below, pins to; what
 every `oc check` and the final `oc gate` for this goal target; and what you
 report as the DoD ledger in Report. Declare outcomes in the orchestrator's own
-session, never a worker's — the orchestrator's database is the one that
-outlives every delivery pane, including the workers themselves.
+session, never a worker's — the orchestrator's session outlives every delivery
+pane, including the workers themselves. Never reuse a previous goal's database:
+its verifiers point at worktrees that Clean up has already removed, so its rows
+would fail this goal's gate.
 
 Re-run `oc check` (or `oc check <id>`) whenever a worker or verifier reports
 progress, so the outcomes pane reflects reality within the batch, not just at

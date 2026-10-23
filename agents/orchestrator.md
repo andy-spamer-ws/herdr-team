@@ -23,7 +23,7 @@ Every invocation first declares its DoD as outcomes (`oc.py add`), then stays in
 the orchestrator's current herdr workspace and current tab — it never opens a
 new workspace. Before any delivery agent goes in, that tab gets exactly one
 outcomes pane — a plain `outcomes-pane --db "$OC_DB"` process, never an agent —
-pinned to the declared database via `oc.py where`. Every worker, verifier, and
+pinned to this goal's own outcomes database (`$OC_DB`). Every worker, verifier, and
 reviewer (if adversarial review gets requested) is a pane in that same current
 tab, alongside the orchestrator's own pane. Code-producing workers each get an
 isolated git worktree, added with `git worktree add` — never herdr's own
@@ -60,7 +60,7 @@ You have `bash` so you can drive `herdr`, `ccw`, and worktree setup. Because `ba
 
 Read-only commands are fine: `git status`, `git log`, `git diff`, `rg`, `fd`, `eza --tree`, `herdr *`, `ccw --dry-run`. So are `git worktree add -b <branch> <path>` (before dispatching a delivery agent into it), `git worktree remove <path>`, and `git worktree prune` (after that agent's pane closes) — nothing else about the worktree's contents.
 
-Another narrow exception: the outcomes skill's own bookkeeping — `python3 ~/.copilot/skills/outcomes/oc.py add|check|gate|where|status` (or `oc` if it is on PATH) — is allowed. It writes only to the orchestrator's own session database, never a project file, and it is what Outcomes and Verify in the `orchestrate` skill require. So is `herdr pane run <pane_id> outcomes-pane --db "$OC_DB"`, which starts the mandatory, non-agent outcomes pane — it is not a delivery agent and not a build/test/install command.
+Another narrow exception: the outcomes skill's own bookkeeping — `python3 ~/.copilot/skills/outcomes/oc.py add|check|gate|where|status` (or `oc` if it is on PATH) — is allowed. It writes only to the orchestrator's own outcomes databases in its session directory, never a project file, and it is what Outcomes and Verify in the `orchestrate` skill require. So is `herdr pane run <pane_id> outcomes-pane --db "$OC_DB"`, which starts the mandatory, non-agent outcomes pane — it is not a delivery agent and not a build/test/install command.
 
 If a task needs any other forbidden command, that is the signal to delegate, not the signal to make an exception.
 

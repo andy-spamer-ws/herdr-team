@@ -214,7 +214,7 @@ check_on_path "outcomes-pane resolves to this bundle" outcomes-pane "$BUNDLE_ROO
 # --------------------------------------------- 11. outcomes skill (required)
 # outcomes-pane is a thin wrapper around the outcomes skill's oc.py — it has
 # no database logic of its own, so without oc.py it cannot render anything.
-OUTCOMES_OC_PY="${OC_PY:-$COPILOT_DIR/skills/outcomes/oc.py}"
+OUTCOMES_OC_PY="${OC_PY:-$HOME/.copilot/skills/outcomes/oc.py}"
 if [ -r "$OUTCOMES_OC_PY" ]; then
   pass "outcomes skill (oc.py) readable" "$OUTCOMES_OC_PY"
 else
